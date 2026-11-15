@@ -22,7 +22,7 @@ In the `dagger.toml` of a repository that holds Cargo workspaces:
 
 ```toml
 [modules.rust]
-source = "github.com/tokeira/dagger-rust-toolchain@v0.1.0"
+source = "github.com/tokeira/dagger-rust-toolchain@v0.2.0"
 
 [modules.rust.settings]
 fmtToolchain = "nightly-2026-06-16"
