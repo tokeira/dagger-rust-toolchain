@@ -74,7 +74,7 @@ type Dev {
   }
 
   """
-  Check the workspaceRoots setting, and the fmt and deny lanes.
+  Check the workspaceRoots setting, and the fmt, deny and advisories lanes.
   """
   lintLanes(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
     let run = devBegin(ws, "lint-lanes")
@@ -106,7 +106,7 @@ type Dev {
   }
 
   """
-  Check that the six lanes of one workspace share one recipe and one fetch.
+  Check that the seven lanes of one workspace share one recipe and one fetch.
   """
   sharedLayers(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
     let run = devBegin(ws, "shared-layers")

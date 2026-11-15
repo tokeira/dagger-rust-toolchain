@@ -279,12 +279,24 @@ type RustWorkspace {
   }
 
   """
-  Check the workspace's dependencies with cargo-deny.
+  Check the workspace's bans, licences and sources with cargo-deny.
 
-  Applies when the workspace has a deny.toml.
+  Applies when the workspace has a deny.toml. It reads no advisory database,
+  so only a change to the workspace changes its verdict.
   """
   deny(ws: Workspace!): Void @check {
     rustDenyLane(self, inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  Check the workspace's dependencies against the RustSec advisories with cargo-deny.
+
+  Applies when the workspace has a deny.toml. It reads the advisory database
+  as RustSec has it when the check runs, so a new advisory fails it with no
+  change to the workspace.
+  """
+  advisories(ws: Workspace!): Void @check {
+    rustAdvisoriesLane(self, inputs(ws, rustDiscover(tool, ws)))
   }
 
   """

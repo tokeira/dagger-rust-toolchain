@@ -1,0 +1,46 @@
+# The advisories lane: `cargo deny check advisories`, when the workspace has a
+# deny.toml. docs/lanes.md has the contract.
+#
+# It is cargo-deny's one check that reads something outside the repository:
+# the RustSec advisory database, as it is when the check runs. So it is a
+# lane of its own, which runs again whenever RustSec publishes, and can fail
+# with no change to the workspace. The deny lane, in lane-deny.dang, runs
+# the other three checks and never reads the database.
+
+# The advisory database cargo-deny reads unless deny.toml names another.
+let rustAdvisoriesDatabaseAddress: String! = "https://github.com/RustSec/advisory-db"
+
+# Where cargo-deny keeps that database, below Cargo's home: a directory
+# named for the address and a hash of it.
+let rustAdvisoriesDatabasePath: String! = "advisory-dbs/advisory-db-3157b0e258782691"
+
+# The advisory database at the commit its default branch is at now, with its
+# .git directory, which cargo-deny opens. The engine resolves the branch on
+# every run and never pins it in the repository's dagger.lock: a check for
+# new advisories must see them.
+let rustAdvisoriesDatabase: Directory! {
+  git(rustAdvisoriesDatabaseAddress).head(noLock: true).tree
+}
+
+# The lane's step: the deny lane's container with the database mounted where
+# cargo-deny keeps it, and the advisories check.
+let rustAdvisoriesStep(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+  rustDenyContainer(workspace, inputs)
+    .withMountedDirectory(
+      rustCargoHome(workspace.tool) + "/" + rustAdvisoriesDatabasePath,
+      rustAdvisoriesDatabase,
+    )
+    .withExec(rustDenyCommand(workspace.tool, ["advisories"]), expect: ANY)
+}
+
+# Fails when the advisory database has an advisory against a dependency of
+# the workspace.
+let rustAdvisoriesLane(workspace: RustWorkspace!, inputs: RustInputs!): Void {
+  if (rustDenyApplies(workspace, inputs)) {
+    let ran = rustAdvisoriesStep(workspace, inputs)
+    if (ran.exitCode != 0) {
+      raise rustDenyFailure(workspace, ["advisories"], ran)
+    }
+  }
+  null
+}

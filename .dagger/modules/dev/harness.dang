@@ -39,6 +39,7 @@ let devHelper: String! = "/usr/local/bin/rust-lane-helper"
 # The checks of the module, each with whether it belongs to a package rather
 # than a workspace.
 let devChecks: [{{name: String!, ofPackage: Boolean!}}!]! = [
+  {{name: "advisories", ofPackage: false}},
   {{name: "check", ofPackage: false}},
   {{name: "clippy", ofPackage: true}},
   {{name: "deny", ofPackage: false}},

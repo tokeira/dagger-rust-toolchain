@@ -1,5 +1,5 @@
-# The acceptance of the fmt and deny lanes, and of the `workspaceRoots`
-# setting.
+# The acceptance of the fmt, deny and advisories lanes, and of the
+# `workspaceRoots` setting.
 #
 # The fixtures are `lint-roots`, a repository with a Cargo project that Cargo
 # cannot load; `lint-fmt`, a workspace with packages that rustfmt changes and
@@ -9,8 +9,9 @@
 # What the engine's `stale` check says when a generator returns changes.
 let devLintStale: String! = "generated files are not up to date"
 
-# Runs the assertions of the fmt and deny lanes and of `workspaceRoots`. Each
-# group is bound before the lists are joined, as in devBuild.
+# Runs the assertions of the fmt, deny and advisories lanes and of
+# `workspaceRoots`. Each group is bound before the lists are joined, as in
+# devBuild.
 let devLint(run: DevRun!): [String!]! {
   let single = devLintSingle(run)
   let roots = devLintRoots(run)
@@ -24,11 +25,11 @@ let devLintSingle(run: DevRun!): [String!]! {
   let workspace = devConsumer(run, "single", "")
   devStdout(workspace, run, ["check", "--check=stale"])
   devStdout(workspace, run, ["generate", "--no-apply"])
-  devStdout(workspace, run, ["check", "--check=deny"])
+  devStdout(workspace, run, ["check", "--check=deny", "--check=advisories"])
   [
     devHeld(
       "single: the stale check and dagger generate pass on a formatted package, and the deny "
-        + "check passes in a workspace with no deny.toml",
+        + "and advisories checks pass in a workspace with no deny.toml",
     ),
   ]
 }
@@ -182,63 +183,174 @@ let devLintFmt(run: DevRun!): [String!]! {
   passed
 }
 
-# The deny lane: when it applies, what it rejects, and which edits run
-# cargo-deny again.
+# cargo-deny's commands: the deny lane's, and the advisories lane's.
+let devLintDenyCommand: String! = "cargo deny --locked check --disable-fetch bans licenses sources"
+
+let devLintAdvisoriesCommand: String! = "cargo deny --locked check --disable-fetch advisories"
+
+# Where the module takes the advisory database from, in its source, and an
+# earlier commit of the database, of 29 May 2026: what the module reads once
+# the acceptance has put the commit in place of the branch. The commit never
+# changes, and cargo-deny 0.19.9 calls a database stale after 90 days.
+let devLintDatabaseFile: String! = "lane-advisories.dang"
+
+let devLintDatabaseHead: String! = ".head(noLock: true)"
+
+let devLintDatabaseEarlier: String! = "eaf48e749baa3d5e27d304107d8abf175fd756bb"
+
+# The deny and advisories lanes: when they apply, what each rejects, and which
+# changes run cargo-deny again.
 let devLintDeny(run: DevRun!): [String!]! {
   let passed: [String!]! = []
   let workspace = devConsumer(run, "lint-deny", "")
-  let bare = ["check", "--check=deny", "--rust-workspace=bare"]
-  let clean = ["check", "--check=deny", "--rust-workspace=clean"]
-  let flagged = ["check", "--check=deny", "--rust-workspace=flagged"]
-  let command = "cargo deny --locked check --disable-fetch"
+  let both = ["check", "--check=deny", "--check=advisories"]
+  let bare = both + ["--rust-workspace=bare"]
+  let clean = both + ["--rust-workspace=clean"]
+  let commands = [devLintDenyCommand, devLintAdvisoriesCommand]
 
   let first = devTraced(workspace, run, clean)
-  if (first.any { exec => exec.command.hasPrefix(command) } == false) {
-    raise devCheckFailed(
-      "the deny check of clean",
-      "did not run `" + command + "`:\n" + devDescribed(first),
-    )
+  devEach(commands) { command =>
+    if (first.any { exec => exec.command.hasPrefix(command) } == false) {
+      raise devCheckFailed(
+        "the deny and advisories checks of clean",
+        "did not run `" + command + "`:\n" + devDescribed(first),
+      )
+    }
   }
   let without = devLintTrace(workspace, run, bare)
-  devLintAbsent("the deny check of bare", without, "cargo deny")
+  devLintAbsent("the deny and advisories checks of bare", without, "cargo deny")
   passed += [
     devHeld(
-      "lint-deny: the deny check of clean, which has a deny.toml, passes on `" + command
-        + "`, and that of bare, which has none, passes without running cargo-deny",
+      "lint-deny: the deny check of clean, which has a deny.toml, passes on `"
+        + devLintDenyCommand + "` and its advisories check on `" + devLintAdvisoriesCommand
+        + "`, and those of bare, which has none, pass without running cargo-deny",
     ),
   ]
 
-  devEach(["rust: cargo deny check failed in flagged:", "RUSTSEC-2020-0095"]) { reason =>
-    devRefused(workspace, run, flagged, reason)
+  let advisories = ["check", "--check=advisories", "--rust-workspace=flagged"]
+  devEach(["rust: cargo deny check advisories failed in flagged:", "RUSTSEC-2020-0095"]) { reason =>
+    devRefused(workspace, run, advisories, reason)
   }
   passed += [
     devHeld(
-      "lint-deny: the deny check of flagged fails with \"rust: cargo deny check failed in "
-        + "flagged:\" and the advisory RUSTSEC-2020-0095 of its dependency, read from the advisory "
-        + "database",
+      "lint-deny: the advisories check of flagged fails with \"rust: cargo deny check "
+        + "advisories failed in flagged:\" and the advisory RUSTSEC-2020-0095 of its dependency, "
+        + "read from the advisory database",
+    ),
+  ]
+
+  let flagged = devTraced(workspace, run, ["check", "--check=deny", "--rust-workspace=flagged"])
+  if (flagged.any { exec => exec.command.hasPrefix(devLintDenyCommand) } == false) {
+    raise devCheckFailed(
+      "the deny check of flagged",
+      "did not run `" + devLintDenyCommand + "`:\n" + devDescribed(flagged),
+    )
+  }
+  devLintAbsent("the deny check of flagged", flagged, devLintAdvisoriesCommand)
+  passed += [
+    devHeld(
+      "lint-deny: the deny check of flagged passes, on the bans, licences and sources of the "
+        + "dependency that the advisory is about, and runs no advisories check",
+    ),
+  ]
+
+  let banning = workspace
+    .withExec(["sed", "-i", "$ a [bans]", "/lint-deny/clean/deny.toml"])
+    .withExec(["sed", "-i", "$ a deny = [\"cfg-if\"]", "/lint-deny/clean/deny.toml"])
+  let banned = ["check", "--check=deny", "--rust-workspace=clean"]
+  devEach([
+    "rust: cargo deny check bans licenses sources failed in clean:",
+    "is explicitly banned",
+  ]) { reason =>
+    devRefused(banning, run, banned, reason)
+  }
+  devStdout(banning, run, ["check", "--check=advisories", "--rust-workspace=clean"])
+  passed += [
+    devHeld(
+      "lint-deny: when the deny.toml of clean bans its dependency, the deny check fails with "
+        + "\"rust: cargo deny check bans licenses sources failed in clean:\" and the ban, and "
+        + "the advisories check passes",
     ),
   ]
 
   let again = devTraced(workspace, run, clean)
-  devStateOf("a second deny check of clean", again, command, "CACHED")
+  devEach(commands) { command =>
+    devStateOf(
+      "a second run of the deny and advisories checks of clean",
+      again,
+      command,
+      "CACHED",
+    )
+  }
   let edited = workspace.withExec(
     ["sed", "-i", "$ a // " + run.next, "/lint-deny/clean/src/lib.rs"],
   )
-  devStateOf(
-    "the deny check of clean after an edit to a Rust file",
-    devTraced(edited, run, clean),
-    command,
-    "CACHED",
-  )
+  let afterSource = devTraced(edited, run, clean)
+  devEach(commands) { command =>
+    devStateOf(
+      "the deny and advisories checks of clean after an edit to a Rust file",
+      afterSource,
+      command,
+      "CACHED",
+    )
+  }
   let policy = edited.withExec(["sed", "-i", "$ a # " + run.next, "/lint-deny/clean/deny.toml"])
   let after = devTraced(policy, run, clean)
-  let check = "the deny check of clean after an edit to deny.toml"
-  devStateOf(check, after, command, "DONE")
+  let check = "the deny and advisories checks of clean after an edit to deny.toml"
+  devEach(commands) { command =>
+    devStateOf(check, after, command, "DONE")
+  }
   devStateOf(check, after, "cargo fetch --locked", "CACHED")
   passed += [
     devHeld(
-      "lint-deny: a second deny check, and one after an edit to a Rust file, re-execute no "
-        + "cargo deny; after an edit to deny.toml cargo deny runs again and cargo fetch does not",
+      "lint-deny: a second run of the deny and advisories checks, and one after an edit to a "
+        + "Rust file, re-execute no cargo deny; after an edit to deny.toml both cargo deny "
+        + "commands run again and cargo fetch does not",
+    ),
+  ]
+
+  # The database moves: the module reads it at an earlier commit, in place of
+  # where its branch is now.
+  let moved = policy.withExec(
+    [
+      "sed",
+      "-i",
+      "s/" + devLintDatabaseHead + "/.commit(\"" + devLintDatabaseEarlier + "\")/",
+      devModulePath + "/" + devLintDatabaseFile,
+    ],
+  )
+  let source = moved.file(devModulePath + "/" + devLintDatabaseFile).contents rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  if (source.contains(devLintDatabaseEarlier) == false) {
+    raise devCheckFailed(
+      devLintDatabaseFile,
+      "does not take the advisory database with `" + devLintDatabaseHead + "`",
+    )
+  }
+  # cargo-deny refuses a database whose last commit is more than 90 days old,
+  # so the advisories check fails, and says which database it read.
+  let afterMove = devBuildTracedAny(moved, run, clean)
+  let moveCheck = "the deny and advisories checks of clean after the advisory database moves"
+  devStateOf(moveCheck, afterMove, devLintAdvisoriesCommand, "DONE")
+  devStateOf(moveCheck, afterMove, devLintDenyCommand, "CACHED")
+  devEach([
+    "rust: cargo deny check advisories failed in clean:",
+    "repository is stale (last update: 2026-05-29",
+  ]) { reason =>
+    devRefused(
+      moved,
+      run,
+      ["check", "--check=advisories", "--rust-workspace=clean"],
+      reason,
+    )
+  }
+  devStdout(moved, run, ["check", "--check=deny", "--rust-workspace=clean"])
+  passed += [
+    devHeld(
+      "lint-deny: when only the advisory database moves, here to its commit of 29 May 2026, "
+        + "the advisories check runs cargo deny again, which reads that commit and refuses it "
+        + "as stale, and the deny check's cargo deny stays cached and passes",
     ),
   ]
   passed

@@ -1,20 +1,14 @@
-# The deny lane: `cargo deny check`, when the workspace has a deny.toml.
-# docs/lanes.md has the contract.
+# The deny lane: `cargo deny check bans licenses sources`, when the workspace
+# has a deny.toml. docs/lanes.md has the contract.
 #
 # The step's inputs are all content: the toolchain layer, the fetch layer's
-# crates, the cargo-deny binary, the advisory database at one commit, and the
-# workspace without the contents of its Rust files. It runs again when one of
-# them changes, which for the database is whenever RustSec publishes.
+# crates, the cargo-deny binary, and the workspace without the contents of its
+# Rust files. It reads no advisory database, so nothing outside the
+# repository makes it run again. The advisories lane, in lane-advisories.dang,
+# runs cargo-deny's fourth check over the same container, with the database.
 
 # The release of cargo-deny that the lane runs.
 let rustDenyVersion: String! = "0.19.9"
-
-# The advisory database cargo-deny reads unless deny.toml names another.
-let rustDenyDatabaseAddress: String! = "https://github.com/RustSec/advisory-db"
-
-# Where cargo-deny keeps that database, below Cargo's home: a directory
-# named for the address and a hash of it.
-let rustDenyDatabasePath: String! = "advisory-dbs/advisory-db-3157b0e258782691"
 
 # The cargo-deny binary for a platform, from the project's release archive.
 # The engine checks the archive against the digest before it unpacks it. The
@@ -37,14 +31,6 @@ let rustDenyBinary(platform: String!): File! {
       + "/cargo-deny-" + rustDenyVersion + "-" + triple + ".tar.gz",
     checksum: "sha256:" + digest,
   ).extract(stripComponents: 1).file("cargo-deny")
-}
-
-# The advisory database at the commit its default branch is at now, with its
-# .git directory, which cargo-deny opens. The engine resolves the branch on
-# every run and never pins it in the repository's dagger.lock: a check for
-# new advisories must see them.
-let rustDenyDatabase: Directory! {
-  git(rustDenyDatabaseAddress).head(noLock: true).tree
 }
 
 # What cargo-deny reads of the workspace: the skeleton, and every file that
@@ -78,29 +64,58 @@ let rustDenyFlags(tool: Rust!): [String!]! {
     + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
 }
 
-# `cargo deny check` in the workspace root, off the network: the crates come
-# from the fetch layer and the advisory database from the engine.
-let rustDenyStep(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+# The checks of cargo-deny that the lane runs: those that read the workspace
+# and its crates alone.
+let rustDenyChecks: [String!]! = ["bans", "licenses", "sources"]
+
+# Whether the lanes that run cargo-deny apply: the workspace root has a
+# deny.toml.
+let rustDenyApplies(workspace: RustWorkspace!, inputs: RustInputs!): Boolean! {
+  inputs.source.exists(rustPathIn(workspace.path, "deny.toml"))
+}
+
+# The container cargo-deny runs in, in the workspace root, off the network:
+# the toolchain layer with the fetch layer's crates, cargo-deny among Cargo's
+# own binaries, and the workspace's tree. It holds no advisory database.
+let rustDenyContainer(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
   let tool = workspace.tool
-  let home = rustCargoHome(tool)
   let platform = rustImage(tool).platform
   workspace
     .withCrates(inputs, workspace.toolchainOf(inputs, []))
-    .withFile(home + "/bin/cargo-deny", rustDenyBinary(`${platform}`))
-    .withMountedDirectory(home + "/" + rustDenyDatabasePath, rustDenyDatabase)
+    .withFile(rustCargoHome(tool) + "/bin/cargo-deny", rustDenyBinary(`${platform}`))
     .withMountedDirectory(workspace.mountPath, rustDenyTree(workspace, inputs))
-    .withExec(
-      ["cargo", "deny"] + rustDenyFlags(tool) + ["check", "--disable-fetch"],
-      expect: ANY,
-    )
 }
 
-# Fails when cargo-deny rejects the workspace's dependencies.
+# `cargo deny check` for some of its checks, with the flags of the settings.
+# cargo-deny never fetches: the crates come from the fetch layer, and the
+# advisories lane mounts the database.
+let rustDenyCommand(tool: Rust!, checks: [String!]!): [String!]! {
+  ["cargo", "deny"] + rustDenyFlags(tool) + ["check", "--disable-fetch"] + checks
+}
+
+# What to tell the user of a cargo-deny command that rejected the workspace.
+let rustDenyFailure(
+  workspace: RustWorkspace!,
+  checks: [String!]!,
+  ran: Container!,
+): String! {
+  "rust: cargo deny check " + checks.join(" ") + " failed in " + workspace.path + ":\n"
+    + ran.stderr + ran.stdout
+}
+
+# The lane's step: the bans, licences and sources checks.
+let rustDenyStep(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+  rustDenyContainer(workspace, inputs)
+    .withExec(rustDenyCommand(workspace.tool, rustDenyChecks), expect: ANY)
+}
+
+# Fails when cargo-deny rejects the workspace's dependencies for a ban, a
+# licence or a source.
 let rustDenyLane(workspace: RustWorkspace!, inputs: RustInputs!): Void {
-  if (inputs.source.exists(rustPathIn(workspace.path, "deny.toml"))) {
+  if (rustDenyApplies(workspace, inputs)) {
     let ran = rustDenyStep(workspace, inputs)
     if (ran.exitCode != 0) {
-      raise "rust: cargo deny check failed in " + workspace.path + ":\n" + ran.stderr + ran.stdout
+      raise rustDenyFailure(workspace, rustDenyChecks, ran)
     }
   }
   null

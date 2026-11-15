@@ -16,6 +16,7 @@ let devCoreSingle(run: DevRun!): [String!]! {
   ]
 
   let addresses = [
+    "rust/workspaces/advisories",
     "rust/workspaces/check",
     "rust/workspaces/deny",
     "rust/workspaces/doc",
@@ -536,7 +537,8 @@ let devCoreShared(run: DevRun!): [String!]! {
     "cargo clippy",
     "cargo nextest list",
     "cargo check --quiet",
-    "cargo deny",
+    "cargo deny --locked check --disable-fetch bans licenses sources",
+    "cargo deny --locked check --disable-fetch advisories",
     "cargo doc",
   ]) { lane =>
     if (execs.any { exec => exec.command.hasPrefix(lane) } == false) {
@@ -554,7 +556,7 @@ let devCoreShared(run: DevRun!): [String!]! {
   }
   [
     devHeld(
-      "lint-deny: the six lanes of the workspace clean, which has a registry dependency and "
+      "lint-deny: the seven lanes of the workspace clean, which has a registry dependency and "
         + "a deny.toml, run over one recipe and one cargo fetch",
     ),
   ]
