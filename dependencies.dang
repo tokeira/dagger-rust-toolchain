@@ -156,6 +156,15 @@ let rustDependenciesFlags(tool: Rust!): [String!]! {
     + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
 }
 
+# The feature flags of the settings: --features, --all-features and
+# --no-default-features.
+let rustDependenciesFeatures(tool: Rust!): [String!]! {
+  let none: [String!]! = []
+  (if (tool.features.length == 0) { none } else { ["--features", tool.features.join(",")] })
+    + (if (tool.allFeatures) { ["--all-features"] } else { none })
+    + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
+}
+
 # The dependency layer, check flavour: the fetch layer, which has the recipe
 # mounted, with the workspace's dependencies compiled by `cargo check` into
 # the target directory.

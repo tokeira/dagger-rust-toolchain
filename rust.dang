@@ -60,6 +60,16 @@ type Rust {
   noDefaultFeatures: Boolean!
 
   """
+  Whether the check lane builds the workspace under --all-features.
+  """
+  checkAllFeatures: Boolean!
+
+  """
+  Whether the check lane builds the workspace under --no-default-features.
+  """
+  checkNoDefaultFeatures: Boolean!
+
+  """
   Cargo profile passed to every Cargo command. Null uses Cargo's default.
   """
   buildProfile: String
@@ -157,6 +167,15 @@ type Rust {
     """
     noDefaultFeatures: Boolean! = false,
     """
+    Build the workspace under --all-features in the check lane. Turn it off
+    for a workspace whose features do not all compile together.
+    """
+    checkAllFeatures: Boolean! = true,
+    """
+    Build the workspace under --no-default-features in the check lane.
+    """
+    checkNoDefaultFeatures: Boolean! = true,
+    """
     Cargo profile passed to every Cargo command.
     """
     buildProfile: String = null,
@@ -220,6 +239,8 @@ type Rust {
       self.features = features
       self.allFeatures = allFeatures
       self.noDefaultFeatures = noDefaultFeatures
+      self.checkAllFeatures = checkAllFeatures
+      self.checkNoDefaultFeatures = checkNoDefaultFeatures
       self.buildProfile = buildProfile
       self.target = target
       self.locked = locked

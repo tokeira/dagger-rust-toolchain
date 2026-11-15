@@ -272,7 +272,9 @@ type RustWorkspace {
   """
   Type-check the workspace with cargo check.
 
-  Covers the feature sets that clippy does not.
+  Covers the feature sets that clippy does not: no feature, and every
+  feature. With both left out, it checks the workspace under the settings'
+  features.
   """
   check(ws: Workspace!): Void @check {
     rustCheckLane(self, inputs(ws, rustDiscover(tool, ws)))

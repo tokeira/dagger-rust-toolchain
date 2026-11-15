@@ -9,14 +9,26 @@
 #   --all-features          every feature at once
 #
 # each for the libraries and binaries of every member. An end is left out
-# when the settings already put clippy there.
+# when the settings already put clippy there, and when its setting,
+# checkNoDefaultFeatures or checkAllFeatures, turns it off.
+#
+# When no end is left, the lane checks the workspace once under the
+# settings' own features. A check that passed has then always compiled the
+# workspace: it never passes for having had nothing to do.
 
-# The feature sets the lane checks, as Cargo's flags.
-let rustCheckSets(tool: Rust!): [[String!]!]! {
+# The ends of the feature space the lane checks, as Cargo's flags.
+let rustCheckEnds(tool: Rust!): [[String!]!]! {
   let none: [[String!]!]! = []
   let bare = tool.noDefaultFeatures and tool.features.length == 0 and tool.allFeatures == false
-  (if (bare) { none } else { [["--no-default-features"]] })
-    + (if (tool.allFeatures) { none } else { [["--all-features"]] })
+  (if (bare or tool.checkNoDefaultFeatures == false) { none } else { [["--no-default-features"]] })
+    + (if (tool.allFeatures or tool.checkAllFeatures == false) { none } else { [["--all-features"]] })
+}
+
+# The feature sets of the lane's commands, as Cargo's flags: the ends, or
+# the settings' own features when no end is left.
+let rustCheckSets(tool: Rust!): [[String!]!]! {
+  let ends = rustCheckEnds(tool)
+  if (ends.length == 0) { [rustDependenciesFeatures(tool)] } else { ends }
 }
 
 # The lane's commands, one for each feature set, in the lane's container:
@@ -26,16 +38,18 @@ let rustCheckSets(tool: Rust!): [[String!]!]! {
 # under one set apart from the others, so a set compiles again only what an
 # edit changed, and what the features change. Each step syncs the mirror
 # and runs Cargo itself, so each is right whatever ran before it.
+#
+# The dependency layer compiles the dependencies under each end. Under the
+# settings' own features it has them already, for clippy and doc.
 let rustCheckRun(workspace: RustWorkspace!, inputs: RustInputs!): {{step: Container!, failures: [String!]!}}! {
-  let sets = rustCheckSets(workspace.tool)
   let failures: [String!]! = []
-  let step = sets.reduce(
+  let step = rustCheckSets(workspace.tool).reduce(
     rustDependenciesLane(
       workspace,
       inputs,
       "check",
       [],
-      rustDependenciesLayer(workspace, inputs, sets),
+      rustDependenciesLayer(workspace, inputs, rustCheckEnds(workspace.tool)),
       "",
     ),
   ) { lane, set =>
@@ -47,7 +61,7 @@ let rustCheckRun(workspace: RustWorkspace!, inputs: RustInputs!): {{step: Contai
       [],
     )
     if (ran.exitCode != 0) {
-      failures += ["cargo check " + set.join(" ") + " failed in " + workspace.path + ":\n" + ran.stderr]
+      failures += [(["cargo", "check"] + set).join(" ") + " failed in " + workspace.path + ":\n" + ran.stderr]
     }
     ran
   }

@@ -55,14 +55,6 @@ let rustTestProfileFlags(tool: Rust!): [String!]! {
     + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
 }
 
-# The feature flags of the settings.
-let rustTestFeatureFlags(tool: Rust!): [String!]! {
-  let none: [String!]! = []
-  (if (tool.features.length == 0) { none } else { ["--features", tool.features.join(",")] })
-    + (if (tool.allFeatures) { ["--all-features"] } else { none })
-    + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
-}
-
 # The layer. Two commands make it:
 #
 #   cargo build --tests --workspace <flags>
@@ -93,7 +85,7 @@ let rustTestDependencies(workspace: RustWorkspace!, inputs: RustInputs!): Contai
       workspace.recipeOf(inputs),
     ),
     ["cargo", "build", "--tests", "--workspace"]
-      + locked + rustTestProfileFlags(tool) + rustTestFeatureFlags(tool),
+      + locked + rustTestProfileFlags(tool) + rustDependenciesFeatures(tool),
     "/tmp/rust-test-dependencies-output",
   )
   if (compiled.exitCode != 0) {

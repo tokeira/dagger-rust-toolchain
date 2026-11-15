@@ -27,11 +27,12 @@ let devBuild(run: DevRun!): [String!]! {
   let dependencies = devBuildDependencies(run)
   let clippy = devBuildClippy(run)
   let check = devBuildCheck(run)
+  let ends = devBuildEnds(run)
   let doc = devBuildDoc(run)
   let stale = devBuildStale(run)
   let signal = devBuildSignal(run)
   let layouts = devBuildLayouts(run)
-  dependencies + clippy + check + doc + stale + signal + layouts
+  dependencies + clippy + check + ends + doc + stale + signal + layouts
 }
 
 # Checks that the clippy check of a package reaches its lane: that the shared
@@ -440,6 +441,131 @@ let devBuildCheck(run: DevRun!): [String!]! {
         + "alone and passes",
     ),
   ]
+
+  # The end that fails, left out by its own setting. clippy stays under the
+  # default features, and passes.
+  let spared = devConfigured(workspace, run, "build-features", "checkNoDefaultFeatures = false\n")
+  let kept = devBuildRan(devBuildTracedAny(spared, run, lane), "cargo check --quiet")
+  if (kept != remaining) {
+    raise devCheckFailed(
+      "dagger check --check=check under checkNoDefaultFeatures = false",
+      "ran " + devQuotedList(kept) + ", not " + devQuotedList(remaining),
+    )
+  }
+  devStdout(spared, run, ["check", "--check=check", "--check=clippy"])
+  passed += [
+    devHeld(
+      "build-features: under checkNoDefaultFeatures = false the check lane runs "
+        + "--all-features alone and passes, and clippy, under the default features, passes",
+    ),
+  ]
+  passed
+}
+
+# The package that compiles with no feature and not with every feature: the
+# settings that leave an end of the feature space out of the check lane, and
+# what the lane runs when they leave none.
+let devBuildEnds(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "build-ends", "")
+  let lane = ["check", "--check=check"]
+  let plain = "cargo check --quiet --workspace --locked"
+  let bare = plain + " --no-default-features"
+  let every = plain + " --all-features"
+  let broken = "build-ends does not compile with its experimental feature"
+
+  let check = "dagger check --check=check over build-ends"
+  let output = devFailing(workspace, run, lane)
+  devSays(check, output, "rust: cargo check --all-features failed in .:")
+  devSays(check, output, broken)
+  devSilent(check, output, "cargo check --no-default-features failed")
+  devBuildSame(
+    check,
+    devBuildRan(devBuildTracedAny(workspace, run, lane), "cargo check --quiet"),
+    [
+      bare,
+      every,
+    ],
+  )
+  passed += [
+    devHeld(
+      "build-ends: by default the check lane runs both ends, and --all-features fails with "
+        + "the compile error of a package whose features do not compile together",
+    ),
+  ]
+
+  let without = devConfigured(workspace, run, "build-ends", "checkAllFeatures = false\n")
+  let withoutCheck = "dagger check --check=check under checkAllFeatures = false"
+  let spared = devBuildTracedAny(without, run, lane)
+  devBuildSame(withoutCheck, devBuildRan(spared, "cargo check --quiet"), [bare])
+  devStdout(without, run, lane)
+  devBuildSame(
+    "the dependency layer under checkAllFeatures = false",
+    devBuildRan(spared, "cargo check --workspace"),
+    [
+      "cargo check --workspace --all-targets --locked",
+      "cargo check --workspace --locked",
+      "cargo check --workspace --locked --no-default-features",
+    ],
+  )
+  passed += [
+    devHeld(
+      "build-ends: under checkAllFeatures = false the check lane runs --no-default-features "
+        + "alone and passes, and the dependency layer compiles no --all-features shape",
+    ),
+  ]
+
+  let alone = devConfigured(workspace, run, "build-ends", "checkNoDefaultFeatures = false\n")
+  let aloneCheck = "dagger check --check=check under checkNoDefaultFeatures = false"
+  let aloneOutput = devFailing(alone, run, lane)
+  devSays(aloneCheck, aloneOutput, "rust: cargo check --all-features failed in .:")
+  devBuildSame(
+    aloneCheck,
+    devBuildRan(devBuildTracedAny(alone, run, lane), "cargo check --quiet"),
+    [every],
+  )
+  passed += [
+    devHeld(
+      "build-ends: under checkNoDefaultFeatures = false the check lane runs --all-features "
+        + "alone, which fails",
+    ),
+  ]
+
+  # No end is left: the lane checks the workspace under the settings' own
+  # features, so that its verdict is still that of a build.
+  let off = "checkAllFeatures = false\ncheckNoDefaultFeatures = false\n"
+  let neither = devConfigured(workspace, run, "build-ends", off)
+  let neitherCheck = "dagger check --check=check with both ends off"
+  let fallback = devTraced(neither, run, lane)
+  devBuildSame(neitherCheck, devBuildRan(fallback, "cargo check --quiet"), [plain])
+  devBuildSame(
+    "the dependency layer with both ends off",
+    devBuildRan(fallback, "cargo check --workspace"),
+    ["cargo check --workspace --all-targets --locked", "cargo check --workspace --locked"],
+  )
+  let featured = devConfigured(
+    workspace,
+    run,
+    "build-ends",
+    off + "features = [\"experimental\"]\n",
+  )
+  let featuredCheck = "dagger check --check=check with both ends off, under a feature"
+  let featuredOutput = devFailing(featured, run, lane)
+  devSays(featuredCheck, featuredOutput, "rust: cargo check --features experimental failed in .:")
+  devSays(featuredCheck, featuredOutput, broken)
+  devBuildSame(
+    featuredCheck,
+    devBuildRan(devBuildTracedAny(featured, run, lane), "cargo check --quiet"),
+    [plain + " --features experimental"],
+  )
+  passed += [
+    devHeld(
+      "build-ends: with both ends off the check lane runs one `" + plain + "`, under the "
+        + "settings' features, and passes on what it compiled, and the dependency layer compiles "
+        + "no end's shape; under features = [\"experimental\"] that one command names the "
+        + "feature and fails with the compile error",
+    ),
+  ]
   passed
 }
 
@@ -622,6 +748,17 @@ let devBuildRan(execs: [DevExec!]!, command: String!): [String!]! {
     # The trace ends a command with its step's options, in one of two forms.
     exec.command.split("\"]").takeFirst(1).join("").split(" (").takeFirst(1).join("")
   }
+}
+
+# Checks that the traced commands `ran` are exactly `expected`, in any order.
+let devBuildSame(check: String!, ran: [String!]!, expected: [String!]!): Void {
+  if (devSorted(ran) != devSorted(expected)) {
+    raise devCheckFailed(
+      check,
+      "ran " + devQuotedList(ran) + ", not " + devQuotedList(expected),
+    )
+  }
+  null
 }
 
 # The one traced command that starts with `command`, with a space after it.
