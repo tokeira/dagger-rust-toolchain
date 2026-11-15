@@ -80,7 +80,10 @@ let rustTestDependencies(workspace: RustWorkspace!, inputs: RustInputs!): Contai
       workspace,
       inputs,
       rustTestCargo(
-        workspace.withCrates(inputs, workspace.toolchainOf(inputs, [])),
+        rustWithJobs(
+          tool,
+          workspace.withCrates(inputs, workspace.toolchainOf(inputs, [])),
+        ),
       ),
       workspace.recipeOf(inputs),
     ),

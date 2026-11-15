@@ -49,10 +49,10 @@ let rustTestNextestFlags(tool: Rust!): [String!]! {
 # names, at their paths in the target directory: the test binaries, the
 # binaries the tests run, and what the members' build scripts wrote.
 #
-# The build's environment and paths are the dependency layer's, and
-# incremental compilation is off, so a package whose inputs did not change
-# has the same test binaries, byte for byte, whether Cargo found them in a
-# warm volume or compiled them in a new one.
+# The build's environment and paths are the dependency layer's, with the
+# settings' job count, and incremental compilation is off, so a package
+# whose inputs did not change has the same test binaries, byte for byte,
+# whether Cargo found them in a warm volume or compiled them in a new one.
 let rustTestCompiled(selection: RustPackages!): Container! {
   let workspace = selection.workspace
   let tool = workspace.tool
@@ -61,10 +61,13 @@ let rustTestCompiled(selection: RustPackages!): Container! {
     selection.inputs,
     "test",
     rustTestCargo(
-      workspace.withCrates(selection.inputs, workspace.toolchainOf(
-        selection.inputs,
-        [],
-      )),
+      rustWithJobs(
+        tool,
+        workspace.withCrates(selection.inputs, workspace.toolchainOf(
+          selection.inputs,
+          [],
+        )),
+      ),
     ),
     rustTestTargetDir,
     rustTestDependencies(workspace, selection.inputs).directory(rustTestTargetDir),

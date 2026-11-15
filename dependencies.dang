@@ -199,8 +199,7 @@ let rustDependenciesLayer(
   let shapes = [check + ["--all-targets"] + tool.cargoFlags, check + tool.cargoFlags]
     + sets.map { set => check + rustDependenciesFlags(tool) + set }
   let shaped = shapes.reduce(
-    workspace
-      .fetchedOf(inputs)
+    rustWithJobs(tool, workspace.fetchedOf(inputs))
       .withEnvVariable("CARGO_NET_OFFLINE", "true")
       .withEnvVariable("CARGO_TARGET_DIR", rustDependenciesTarget),
   ) { ctr, shape => ctr.withExec(shape) }
@@ -224,8 +223,8 @@ let rustDependenciesLayer(
 }
 
 # The container of a check, clippy or doc lane: the toolchain layer with the
-# components the lane asks for and the fetch layer's crates in Cargo's home,
-# as a compile lane's container. Its target directory is the lane's own
+# components the lane asks for, the fetch layer's crates in Cargo's home and
+# the settings' job count, as a compile lane's container. Its target directory is the lane's own
 # volume, which starts from the target directory of `dependencies`; its
 # source is the lane's mirror at the mount path. compile.dang has both.
 #
@@ -240,7 +239,10 @@ let rustDependenciesLane(
   dependencies: Container!,
   marks: String!,
 ): Container! {
-  let toolchain = workspace.withCrates(inputs, workspace.toolchainOf(inputs, components))
+  let toolchain = rustWithJobs(
+    workspace.tool,
+    workspace.withCrates(inputs, workspace.toolchainOf(inputs, components)),
+  )
   if (marks == "") {
     rustCompileLane(
       workspace,

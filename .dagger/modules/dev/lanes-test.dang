@@ -75,8 +75,9 @@ let devTest(run: DevRun!): [String!]! {
   let single = devTestSingle(run)
   let alone = devTestAlone(run)
   let stubs = devTestStubs(run)
+  let jobs = devTestJobs(run)
   let suite = devTestOverSuite(run)
-  runner + single + alone + stubs + suite
+  runner + single + alone + stubs + jobs + suite
 }
 
 # The runner's pins. A run of the lane fetches the archive of the engine's
@@ -217,6 +218,36 @@ let devTestStubs(run: DevRun!): [String!]! {
         + "without the test harness, and for one that depends by path on a package outside its "
         + "root: the dependency layer's test flavour builds over each stub of the recipe, and "
         + "tolerates no failure",
+    ),
+  ]
+}
+
+# The package whose build script fails unless Cargo runs it with three jobs:
+# the buildJobs setting reaches the dependency layer's test flavour, the test
+# build and the doctests.
+let devTestJobs(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "build-jobs", "")
+  let layer = "test-dependencies"
+  let three = devConfigured(workspace, run, "build-jobs", "buildJobs = 3\n")
+    .withNewFile("/build-jobs/acceptance-run.txt", run.next)
+  devBuildJobsInLayer(three, run, layer, true, "3")
+  let steps = devSteps(three, run, devTestChecks)
+  let check = "the tests of build-jobs under buildJobs = 3"
+  devStateOf(check, steps, devTestBuild, "DONE")
+  devStateOf(check, steps, devTestDoctests, "DONE")
+
+  let two = devConfigured(workspace, run, "build-jobs", "buildJobs = 2\n")
+  devBuildJobsInLayer(two, run, layer, false, "2")
+  let output = devTestFailure(two, run, devTestChecks)
+  let failed = "the tests of build-jobs under buildJobs = 2"
+  devSays(failed, output, "rust: test failed in .:")
+  devSays(failed, output, devBuildJobsRefused("2"))
+  [
+    devHeld(
+      "build-jobs: under buildJobs = 3 a package whose build script fails unless Cargo runs "
+        + "it with three jobs compiles in the container of the dependency layer's test flavour, "
+        + "and its test build and doctests run and pass; under buildJobs = 2 the build script "
+        + "says that Cargo ran it with two jobs, there and in the test build, which fails",
     ),
   ]
 }

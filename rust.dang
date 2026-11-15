@@ -85,6 +85,11 @@ type Rust {
   locked: Boolean!
 
   """
+  Cargo's job count in every step that compiles. Null lets Cargo choose.
+  """
+  buildJobs: Int
+
+  """
   Configured start of every cache volume's name. Null uses the workspace name.
   """
   volumePrefix: String
@@ -189,6 +194,12 @@ type Rust {
     """
     locked: Boolean! = true,
     """
+    Cargo's job count in every step that compiles, as CARGO_BUILD_JOBS, such
+    as 1 where memory is short. Defaults to Cargo's own choice, one job for
+    each processor.
+    """
+    buildJobs: Int = null,
+    """
     Start of every cache volume's name. Defaults to the workspace name.
     """
     volumePrefix: String = null,
@@ -230,6 +241,8 @@ type Rust {
       raise "rust: mountPath must be an absolute container path: " + (mountPath ?? "")
     } else if (testRunner != "nextest" and testRunner != "cargo") {
       raise "rust: testRunner must be \"nextest\" or \"cargo\": " + testRunner
+    } else if ((buildJobs ?? 1) == 0) {
+      raise "rust: buildJobs must not be 0: Cargo runs no build with no job"
     } else {
       self.image = image
       self.base = base
@@ -244,6 +257,7 @@ type Rust {
       self.buildProfile = buildProfile
       self.target = target
       self.locked = locked
+      self.buildJobs = buildJobs
       self.volumePrefix = volumePrefix
       self.test = test
       self.clippy = clippy

@@ -28,11 +28,12 @@ let devBuild(run: DevRun!): [String!]! {
   let clippy = devBuildClippy(run)
   let check = devBuildCheck(run)
   let ends = devBuildEnds(run)
+  let jobs = devBuildJobs(run)
   let doc = devBuildDoc(run)
   let stale = devBuildStale(run)
   let signal = devBuildSignal(run)
   let layouts = devBuildLayouts(run)
-  dependencies + clippy + check + ends + doc + stale + signal + layouts
+  dependencies + clippy + check + ends + jobs + doc + stale + signal + layouts
 }
 
 # Checks that the clippy check of a package reaches its lane: that the shared
@@ -566,6 +567,143 @@ let devBuildEnds(run: DevRun!): [String!]! {
         + "feature and fails with the compile error",
     ),
   ]
+  passed
+}
+
+# What the build script of the fixture `build-jobs` says when Cargo ran it
+# with `jobs` jobs, and not the three that its `jobs.txt` names.
+let devBuildJobsRefused(jobs: String!): String! {
+  "build-jobs was built with " + jobs + " jobs, and jobs.txt names 3"
+}
+
+# The arguments of `dagger call` that run `cargo check` over the source in a
+# dependency layer's container, with the layer's own environment, whether it
+# fails or not, and return `result` of that step: its `exit-code`, or its
+# `stderr`. Either is the step's result, not a line of its log.
+let devBuildOverSource(fixture: String!, layer: String!, result: String!): [String!]! {
+  devWorkspaceCall(
+    ".",
+    [
+      layer,
+      "with-mounted-directory",
+      "--path",
+      "/src/" + fixture,
+      "--source",
+      ".",
+      "with-exec",
+      "--args",
+      "cargo,check,--workspace,--locked",
+      "--expect",
+      "ANY",
+      result,
+    ],
+  )
+}
+
+# Checks that `cargo check` over the source of the fixture `build-jobs`, in a
+# dependency layer's container, ran the build script with the job count that
+# `jobs.txt` names when `passes`, and otherwise with `jobs` jobs.
+let devBuildJobsInLayer(
+  workspace: Container!,
+  run: DevRun!,
+  layer: String!,
+  passes: Boolean!,
+  jobs: String!,
+): Void {
+  let check = "cargo check over build-jobs in the container of " + layer + ", with " + jobs + " jobs"
+  let code = devStdout(workspace, run, devBuildOverSource("build-jobs", layer, "exit-code"))
+  let errors = devStdout(workspace, run, devBuildOverSource(
+    "build-jobs",
+    layer,
+    "stderr",
+  ))
+  if (passes) {
+    if (code.trimSpace != "0") {
+      raise devCheckFailed(check, "failed with exit code " + code.trimSpace + ":\n" + devTail(errors))
+    }
+  } else {
+    if (code.trimSpace == "0") {
+      raise devCheckFailed(check, "passed, but must fail")
+    }
+    devSays(check, errors, devBuildJobsRefused(jobs))
+  }
+  null
+}
+
+# The package whose build script fails unless Cargo runs it with three jobs:
+# the buildJobs setting reaches the dependency layer and the check, clippy
+# and doc lanes.
+let devBuildJobs(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "build-jobs", "")
+  let layer = "check-dependencies"
+  let environment = devWorkspaceCall(".", ["check-dependencies", "with-exec", "--args", "env", "stdout"])
+
+  let unset = devLines(devStdout(workspace, run, environment))
+  if (unset.any { line => line.hasPrefix("CARGO_TARGET_DIR=") } == false
+    or unset.any { line => line.hasPrefix("CARGO_BUILD_JOBS=") }) {
+    raise devCheckFailed(
+      "the dependency layer without buildJobs",
+      "has the environment\n" + unset.join("\n") + "\nwhich must name a target directory and "
+        + "no job count",
+    )
+  }
+  passed += [
+    devHeld(
+      "build-jobs: without buildJobs the dependency layer's environment names no job count: "
+        + "Cargo chooses",
+    ),
+  ]
+
+  let three = devConfigured(workspace, run, "build-jobs", "buildJobs = 3\n")
+  devBuildJobsInLayer(three, run, layer, true, "3")
+  devStdout(three, run, devBuildChecks)
+  passed += [
+    devHeld(
+      "build-jobs: under buildJobs = 3 a package whose build script fails unless Cargo runs "
+        + "it with three jobs compiles in the dependency layer's container, and passes the "
+        + "check, clippy and doc checks",
+    ),
+  ]
+
+  let two = devConfigured(workspace, run, "build-jobs", "buildJobs = 2\n")
+  devBuildJobsInLayer(two, run, layer, false, "2")
+  let check = "dagger check under buildJobs = 2"
+  let output = devFailing(two, run, devBuildChecks)
+  devEach([
+    "rust: cargo check --no-default-features failed in .:",
+    "cargo check --all-features failed in .:",
+    "rust: clippy failed in .:",
+    "rust: cargo doc failed in .:",
+    devBuildJobsRefused("2"),
+  ]) { failure =>
+    devSays(check, output, failure)
+  }
+  passed += [
+    devHeld(
+      "build-jobs: under buildJobs = 2 the build script says that Cargo ran it with two "
+        + "jobs, in the dependency layer's container and in each command of the check, clippy "
+        + "and doc lanes, which all fail",
+    ),
+  ]
+
+  # The steps before the dependency layer never see the count: this check ran
+  # them under three jobs, and under none.
+  let traced = devBuildTracedAny(two, run, devBuildChecks)
+  let keys = "the layers under buildJobs = 2, after buildJobs = 3"
+  devEach(["cargo chef prepare", "cargo-chef chef cook --no-build", "cargo fetch"]) { command =>
+    devStateOf(keys, traced, command, "CACHED")
+  }
+  passed += [
+    devHeld(
+      "build-jobs: a change of buildJobs leaves the recipe and the fetch layer cached: only "
+        + "the steps that compile are keyed on it",
+    ),
+  ]
+
+  let none = devConfigured(workspace, run, "build-jobs", "buildJobs = 0\n")
+  devRefused(none, run, ["call", "rust", "build-jobs"], "rust: buildJobs must not be 0")
+  passed += [devHeld("build-jobs: buildJobs = 0 is refused")]
   passed
 }
 

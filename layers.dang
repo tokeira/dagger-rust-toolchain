@@ -116,3 +116,18 @@ let rustWithCrates(tool: Rust!, ctr: Container!, fetched: Container!): Container
     .withMountedDirectory(home + "/git", fetched.directory(home + "/git"))
     .withEnvVariable("CARGO_NET_OFFLINE", "true")
 }
+
+# A container with Cargo's job count from the buildJobs setting, for the
+# steps that compile: both flavours of the dependency layer, and the compile
+# lanes. Cargo reads CARGO_BUILD_JOBS, and so does every Cargo that a step
+# starts in turn: cargo-nextest's, and one that a test runs.
+#
+# A step is keyed on its environment. Without the setting the container is
+# as it was, so no step has a new key. Under it, or when it changes, the
+# steps that compile run again, and no other: the toolchain layer, the
+# recipe and the fetch layer never see it.
+let rustWithJobs(tool: Rust!, ctr: Container!): Container! {
+  if (tool.buildJobs == null) { ctr } else {
+    ctr.withEnvVariable("CARGO_BUILD_JOBS", toString(tool.buildJobs ?? 0))
+  }
+}
