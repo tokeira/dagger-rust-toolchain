@@ -16,44 +16,13 @@ that has run a step can serve it again: the toolchain install, the crate downloa
 dependency build. The lanes that compile the workspace's own packages keep their work in
 cache volumes, so that after an edit Cargo compiles only what the edit reaches.
 
-## Status
-
-Every lane is written, and the repository's [checks](#checks) pass on a
-`v1.0.0-beta.27` engine, the release the module declares and the only one it is tested
-on:
-
-- `fmt`, a generator whose `stale` check is the format check, and the checks `clippy`
-  and `test`, for each package;
-- the checks `check`, `deny` and `doc`, for each workspace.
-
-Under them each workspace has a toolchain layer, one recipe, one fetch layer and a
-dependency layer in two flavours, for `cargo check` and for `cargo test`. A source edit
-runs none of them again.
-
-check, clippy, doc and the test build each have two [cache volumes](#cache-volumes) of
-their own: a target directory that starts from the dependency layer, and a mirror of the
-source. On an engine that holds them, a lane that runs again compiles the packages an
-edit reaches and no other. On an engine that does not, it compiles every member once, on
-top of the dependency layer, as before.
-
-[Measured](#measured) on one workspace and one machine: after a one-line edit, check,
-clippy and doc took 2 to 5 seconds where they took 9 to 11, and the test build took 5
-and 54 seconds where it took about 3 minutes.
-
-Not there yet:
-
-- Measurements on Buildkite, a pipeline for this repository, and a release. The
-  repository has no remote, so the module can only be installed from a local path.
-
-[docs/lanes.md](docs/lanes.md#known-limits) lists the module's known limits.
-
 ## Install
 
 In the `dagger.toml` of a repository that holds Cargo workspaces:
 
 ```toml
 [modules.rust]
-source = "github.com/tokeira/dagger-rust-toolchain@<ref>"
+source = "github.com/tokeira/dagger-rust-toolchain@v0.1.0"
 
 [modules.rust.settings]
 fmtToolchain = "nightly-2026-06-16"
@@ -61,8 +30,7 @@ clippyArgs = ["-D", "warnings"]
 includeExtraFiles = ["proto/**"]
 ```
 
-Until the repository is published, `source` is a path to a checkout, relative to the
-`dagger.toml`, such as `"../dagger-rust-toolchain"`.
+The module needs Dagger `v1.0.0-beta.27` or later.
 
 ```console
 $ dagger check -l --all --rust                       # each check, for each workspace and package
@@ -72,8 +40,6 @@ $ dagger check --rust-package=crates/tokeira-types   # every check of one packag
 $ dagger generate --rust                             # rustfmt, every package
 $ dagger call rust workspace --path . fetched        # a layer, to inspect it
 ```
-
-The module declares `v1.0.0-beta.27`, and is tested on an engine of that release only.
 
 ## Workspaces and packages
 
@@ -115,6 +81,8 @@ file is edited.
 | `check` | Check | Workspace | `rust/workspaces/check` |
 | `deny` | Check | Workspace | `rust/workspaces/deny` |
 | `doc` | Check | Workspace | `rust/workspaces/doc` |
+
+[docs/lanes.md](docs/lanes.md#known-limits) lists the module's known limits.
 
 ### fmt
 
@@ -318,20 +286,6 @@ How they work:
   [docs/lanes.md](docs/lanes.md#known-limits) lists the cases where Cargo itself cannot
   tell that a file changed.
 
-A cache volume stays on the engine that wrote it. On Buildkite agents hosted by
-Namespace, the engine's state is a Namespace cache volume, which is local to a node. The
-module was not run there yet. From how the volumes work, and from what Namespace says of
-its cache:
-
-- a job on a node whose latest cache generation holds the volumes compiles only what
-  changed since that generation;
-- a job on a node with an older generation finds older volumes. The mirror sync brings
-  the source up to date, and Cargo compiles what differs since then;
-- a job on a node with no generation, or after the engine collected the volumes,
-  starts from the dependency layer, which the same job may also have to build;
-- Namespace commits a job's cache only when the job exits 0, so a failed build leaves
-  the volumes as the last green build left them.
-
 The engine counts cache volumes against its storage limit, and collects them like any
 other cached data. Each dependency layer has target volumes of its own, so the volumes
 of a `Cargo.lock` that is no longer in use stay until the engine collects them.
@@ -354,44 +308,53 @@ compiled tokeira-server
 exit 0
 ```
 
-### Measured
+### On CI
 
-One workspace, one machine, one run of each:
+The layers are cached like any other step, so any engine that has built one can serve it
+again. A cache volume is part of the engine's state, so the volumes help where that state
+survives from one run to the next.
+
+On Dagger Cloud, [Cloud Checks](https://docs.dagger.io/cloud-checks/) run the checks that
+`dagger check` runs, on Dagger's engines, for every push and pull request, with no CI file.
+`dagger cloud checks on`, run from the repository's root, turns them on. Dagger chooses
+the engine for each run, and with it the layers and volumes the run starts from.
+
+On Buildkite, with
+[agents hosted by Namespace](https://namespace.so/docs/solutions/buildkite-agents), the
+`nsc-cache-tag` agent tag gives a step a Namespace cache volume
+([agent configuration](https://namespace.so/docs/solutions/buildkite-agents/configuration)).
+Keep the engine's state on it, and stop the engine gracefully before the job ends: an
+engine that is killed wipes its cache when it next starts. Namespace may hold several
+versions of a cache, typically one on each machine that has it, and passes the newest to
+other machines in the background
+([cache volumes](https://namespace.so/docs/architecture/storage/cache-volumes)). So a job
+finds:
+
+- the latest state: each lane compiles only what changed since;
+- an older one: the mirror catches up, and Cargo compiles what differs since then;
+- none, or volumes the engine has since collected: each lane starts from its dependency
+  layer, which the same job may have to build first.
+
+Namespace commits a job's cache only when the job exits cleanly, so after a failed job the
+next one finds what the last clean job left.
+
+### What the volumes save
+
+These figures come from
 [tokeira/dagger-rust-sdk](https://github.com/tokeira/dagger-rust-sdk) at v0.6.0 (five
 members, 276 locked packages, Rust 1.99.1), on a `v1.0.0-beta.27` engine in Docker on an
-Apple-silicon Mac, with `workspaceRoots = ["."]`. "Before" is the module without
-volumes, and "after" the module with them. Each figure is the wall time of one `dagger
-check --check=<lane>`, in seconds, with the layers already built.
+Apple-silicon Mac, with the layers already built. check, clippy and doc are the wall time
+of one `dagger check --check=<lane>`, and the test build is its step's own time, without
+volumes and then with them:
 
-| | check | clippy | doc | test |
+| One-line edit | check | clippy | doc | test build |
 | --- | --- | --- | --- | --- |
-| First run, empty volumes: before | 11.9 | 12.2 | 8.5 | 214 |
-| First run, empty volumes: after | 11.7 | 11.6 | 7.6 | 549 |
-| Again, nothing changed: before | 2.2 | 1.0 | 1.3 | 1.7 |
-| Again, nothing changed: after | 1.7 | 0.8 | 0.8 | 1.3 |
-| One line in a package nothing needs: before | 11.3 | 11.3 | 9.0 | 351 |
-| One line in a package nothing needs: after | 2.7 | 1.8 | 3.7 | 99 |
-| One line in a package two others need: before | 10.2 | 10.8 | 9.0 | 455 |
-| One line in a package two others need: after | 3.6 | 3.9 | 4.6 | 346 |
+| In a package that nothing depends on | 11.3 s → 2.7 s | 11.3 s → 1.8 s | 9.0 s → 3.7 s | 3m25s → 5 s |
+| In a package that two others depend on | 10.2 s → 3.6 s | 10.8 s → 3.9 s | 9.0 s → 4.6 s | 2m44s → 54 s |
 
-The test check's time is mostly the tests themselves, which the volumes do not change:
-this workspace's slowest package runs for four to six minutes. The test build alone,
-by its step's own log:
-
-| | Before | After |
-| --- | --- | --- |
-| First run, empty volumes | 3m12s | 3m07s |
-| One line in a package nothing needs | 3m25s | 5s |
-| One line in a package two others need | 2m44s | 54s |
-
-- Over empty volumes a lane costs what it cost before: the engine starts the target
-  volume from the dependency layer without copying it.
-- The first "after" test check ran every package's tests, and the first "before" one
-  found them in the engine's cache from an earlier run of the same binaries. That
-  accounts for 549 against 214.
-- The engine reached its storage limit during these runs and collected cached results,
-  among them test runs that the last "after" check then ran again.
-- With the layers not built yet, the first check lane took 58 seconds.
+Over empty volumes a lane takes as long as it would without them: the engine starts the
+target volume from the dependency layer without copying it. With nothing changed, every
+lane is answered from the engine's cache in one or two seconds, with or without volumes.
 
 ## Tests
 
@@ -444,40 +407,17 @@ compile error fails the check of every selected package: cargo-nextest and `carg
 have no `--keep-going`. So does a doctest step that fails without saying in which package:
 a package passes it only when Cargo names another package for every failure.
 
-## Engine version
-
-`dagger-module.toml` declares `engineVersion = "v1.0.0-beta.27"`, the one release the
-module is tested on. The engine gives a module the API and the naming rules of the
-release it declares.
-
-The module was not run on any other release. As the engine's source has it at
-`v1.0.0-beta.27`, an engine of an earlier beta does not refuse a module that declares a
-later one: it gives the module its own, older API. Whether the module loads there was
-not tried.
-
-From `v1.0.0-beta.26` the engine spells names that contain acronyms by new rules. No
-type, function or argument of the module contains one, so its flags and check addresses
-are spelled as the source has them.
-
-The module has no `dang.toml`, as dagger.io/go has none. The engine then reads its source
-in the current language version of the Dang it embeds. The `v1.0.0-beta.27` engine embeds
-Dang's library at a pre-release of v2.3.1, commit `00dc3801b409` of
-[github.com/vito/dang](https://github.com/vito/dang), and the language version of that
-commit is 2.1. The [format check](#format) builds `dang` from the same commit, so
-it formats the language the engine reads.
-
 ## Development
 
-The module's source is the `.dang` files at the repository root.
-[docs/lanes.md](docs/lanes.md) describes the layout and the contract that a lane follows.
+The module is the `.dang` files at the repository root. [docs/lanes.md](docs/lanes.md)
+describes its layout, the contract a lane follows, and the checks.
 
-The dev module, `.dagger/modules/dev`, is written in Dang, like the module: the engine
-interprets it, and nothing is compiled before a check starts. It is the workspace's
-main module, so its checks and its generator are the repository's own, and their
-addresses carry no module name:
+The dev module, `.dagger/modules/dev`, is written in Dang, like the module, so nothing
+is compiled before a check starts. It is the workspace's main module, so its checks and
+its generator run from the repository root:
 
 ```console
-$ dagger check                       # every check, side by side
+$ dagger check                       # every check
 $ dagger check -l                    # the checks, each with what it covers
 $ dagger check --check=test-lane     # one check
 $ dagger generate                    # format the Dang source
@@ -487,101 +427,31 @@ They need the `v1.0.0-beta.27` CLI and an engine of that release, and network ac
 Docker Hub, dl.dagger.io, static.rust-lang.org, crates.io, deb.debian.org, github.com
 and proxy.golang.org.
 
-### Checks
-
-Each check copies fixtures under `fixtures/` into repositories of their own, installs
-the module there, and drives it with the Dagger CLI, as a repository that uses the
-module would. It fails with the first assertion that does not hold, and the assertion's
-message.
+Each check installs the module in fixture workspaces from `fixtures/`, and drives it with
+the Dagger CLI as a repository that uses the module would. It fails with the first
+assertion that does not hold.
 
 | Check | Covers |
 | --- | --- |
-| `single-package` | A package at the repository root: its workspace and package keys, the check addresses, and the effect of every setting. |
-| `workspace-members` | A workspace of several members: its keys; the `clippy` and `test` settings; the toolchain, fmt toolchain and fetch layers; that a second run and a source edit re-execute no layer step, and that a manifest that gains a feature re-executes the recipe and the fetch, and not the toolchain install; that listing runs the skeleton's commands and `cargo metadata`, and no other container command. |
-| `two-workspaces` | A repository of two workspaces: their keys, selection by flag and by working directory, the default volume prefixes, `includeExtraFiles`, and that one workspace's manifests are no input of the other's layers. |
-| `nested-workspaces` | A workspace in a directory of another: their keys, and that each one's inputs leave out the other's files. |
-| `lint-lanes` | That `workspaceRoots` keeps Cargo from loading a root it leaves out; what the fmt lane's `stale` check and `dagger generate` do, and that an edit to one package formats no other; when the deny lane runs cargo-deny, that it reads the advisory database, and which edits run it again. |
-| `build-lanes` | What the check, clippy and doc lanes report over the `build-` fixtures, package by package for clippy; that the check flavour of the dependency layer holds the dependencies compiled and nothing of the members, that a source edit or a member's release bump re-executes none of its steps, and that a manifest that gains a feature re-executes them. |
-| `test-lane` | That the archives of cargo-nextest for `linux/amd64` and `linux/arm64` have the pinned checksums; what the test lane runs, what each kind of edit runs again, how it reports a failing test, a failing doctest and a compile error, and the effect of `test`, `testRunner` and `locked` on it; that a failing doctest fails its check in a workspace with a single member, where Cargo names no package. |
-| `cache-volumes` | That the helper's own tests pass; which cache volumes each compile lane mounts; what a lane compiles over empty volumes, after an edit to one file, and after a change to the dependency layer; that a deleted file is gone from the build; that test binaries of untouched packages stay the same, byte for byte; that every check's verdict is the same over warm volumes and over empty ones, through an error, its correction and the error again. |
-| `shared-layers` | That the six lanes of one workspace run over one recipe and one `cargo fetch`. |
-| `dang-format/stale` | That the Dang source is formatted: the module's, and the dev module's. It is the `stale` check of the generator `dang-format`. |
-
-The checks are independent. Each passes alone, on an engine that has run nothing, and
-beside the others, in any order:
-
-- **Volumes.** A check gives the module a `volumePrefix` of its own in every repository
-  it makes, `<check>-<fixture>`, so no two checks mount the same cache volume.
-  `cache-volumes` takes a new prefix on every run, so that its volumes start empty, and
-  leaves them on the engine until it collects them.
-- **Steps.** Where a check asserts that a step runs, the step reads a value of that run,
-  so no earlier run and no other check has run it. Where it asserts that a step is
-  answered from the cache, the same check ran the step before.
-
-No check is answered from the engine's cache: each is declared
-`@cache(policy: FunctionCachePolicy.NEVER)`, and runs whenever it is asked for. A
-check's verdict depends on more than the files it is given. It asserts what the engine
-in hand does, step by step, and `lint-lanes` and `shared-layers` read RustSec's
-advisory database as it is when they run. A verdict kept from an earlier run would say
-nothing of either.
-
-`lint-lanes` fails if RustSec withdraws the advisory its fixture relies on,
-RUSTSEC-2020-0095, or publishes between two runs that the check expects to share a
-cached step.
-
-Wall time in seconds, on a `v1.0.0-beta.27` engine in Docker on an Apple-silicon Mac
-(10 CPUs and 9.8 GiB of memory for the Docker VM). "Cold" is after `dagger core engine
-local-cache prune`, which empties the engine's cache, before each figure. "Warm" is on
-an engine that has run every check. A check alone was run once:
-
-| | Cold | Warm |
-| --- | --- | --- |
-| `single-package` alone | 29 | 8 |
-| `workspace-members` alone | 46 | 11 |
-| `two-workspaces` alone | 20 | 6 |
-| `nested-workspaces` alone | 17 | 3 |
-| `lint-lanes` alone | 32 | 14 |
-| `build-lanes` alone | 69 | 24 |
-| `test-lane` alone | 52 | 38 |
-| `cache-volumes` alone | 58 | 48 |
-| `shared-layers` alone | 20 | 2 |
-| Every check at once, with `dagger check` | 131 and 160 | 76 to 181, in eight runs |
-| Every check, one at a time, with `dagger check -j 1` | not measured | 189 to 384, in three runs |
-
-- On a cold engine a check starts at once: the engine interprets the dev module, and
-  `dagger check -l` answers within a second. A cold run spends its time on what the
-  checks pull, download and build.
-- At once, the checks keep the ten CPUs busy, and the times vary with it. Most of the
-  work is the engine's own, in the `dagger` sessions that the checks start. The
-  engine's memory stayed below 4.3 GiB.
-- `dagger check -j <n>` runs at most `n` checks at once. On a machine that all of them
-  at once overload, the engine can close a session whose client it has not heard from
-  for a few seconds, and the check that started the session fails with `engine closed
-  the session`. That happened to one check, in one of eleven runs of every check at
-  once, on an engine that was also at its storage limit.
-- A run of every check leaves about 2 GB on the engine, in cached steps and in the
-  volumes of `cache-volumes`. An engine at its storage limit collects them while the
-  checks run: every check at once then took 209 and 242 seconds warm.
+| `single-package` | A package at the repository root: its keys, the check addresses, and every setting. |
+| `workspace-members` | A workspace of several members: its keys, the `clippy` and `test` settings, and the toolchain and fetch layers. |
+| `two-workspaces` | Two workspaces in one repository: selection, the default volume prefixes, and separate inputs. |
+| `nested-workspaces` | A workspace in a directory of another. |
+| `lint-lanes` | The `workspaceRoots` setting, and the fmt and deny lanes. |
+| `build-lanes` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. |
+| `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. |
+| `cache-volumes` | The compile lanes' volumes, and the helper that runs a lane's step. |
+| `shared-layers` | That the six lanes of a workspace share one recipe and one fetch. |
+| `dang-format/stale` | That the Dang source is formatted: the module's, and the dev module's. |
 
 After a change to a `.dang` file, the module's or the dev module's, run `dagger
 generate` before `dagger check`: it formats the file, which `dang-format/stale` would
-otherwise fail. The engine reads the dev module's source as it is, so there is nothing
-to compile and no generated file.
+otherwise fail. The helper, in `helper/`, is a Rust crate with no dependencies: `cargo
+test` there runs its tests, and so does `cache-volumes`.
 
-The helper is a Rust crate with no dependency, in `helper/`. Its tests run with `cargo
-test` there, and `cache-volumes` runs them too.
-
-### Format
-
-`dang fmt` formats the Dang source. The generator `dang-format` returns the changes that
-`dang fmt -w` makes to the `.dang` files at the repository root and to those of the dev
-module. `dagger generate` writes them, and the check `dang-format/stale` fails with the
-diff when there are any.
-
-`dang` is built from Dang's source, at the commit that the `v1.0.0-beta.27` engine
-embeds, in a Go image pinned by the digest of its multi-platform index. The engine
-fetches the commit by its full name, and Go checks every dependency against the
-`go.sum` of that commit.
+`dagger generate` also formats the Dang source with `dang fmt`. The generator
+`dang-format` builds `dang` from the commit of Dang that the `v1.0.0-beta.27` engine
+embeds, so that it formats the language the engine reads.
 
 ## Built with Claude
 

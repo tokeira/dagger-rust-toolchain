@@ -305,6 +305,11 @@ or a download that failed.
 - Stay within the Dang that `go.dang` of dagger.io/go uses. The module declares
   `engineVersion = "v1.0.0-beta.27"`, the one release it is tested on, and the engine
   checks its calls against that release's API.
+- The module has no `dang.toml`, as dagger.io/go has none, so the engine reads its
+  source in the current language version of the Dang it embeds. The `v1.0.0-beta.27`
+  engine embeds commit `00dc3801b409` of
+  [github.com/vito/dang](https://github.com/vito/dang), a pre-release of v2.3.1, whose
+  language version is 2.1. `dang-format` builds `dang` from the same commit.
 
 ## Discovery and the `workspaceRoots` setting
 
@@ -937,6 +942,13 @@ the check, and an assertion about what an engine does names that behaviour: that
 step is `CACHED` or `DONE`, that a volume is `LOCKED` and starts from a directory, that
 a failed step is not kept. An engine that behaves otherwise fails that assertion, with
 its message, and no other. The checks were run on `v1.0.0-beta.27` alone.
+
+On a ten-CPU machine, a run of every check took between 2 and 3 minutes on an empty
+engine, and between 1¼ and 3 minutes on a warm one. Together the checks keep every CPU
+busy. On a smaller machine, `dagger check -j <n>` runs at most `n` of them at once: an
+overloaded engine can close a session it has not heard from for a few seconds, and the
+check that started it fails with `engine closed the session`. A run leaves about 2 GB on
+the engine, in cached steps and in the volumes of `cache-volumes`.
 
 When you change a lane or add one:
 
