@@ -519,6 +519,20 @@ let devCoreNested(run: DevRun!): [String!]! {
         + "and the inner workspace's volume prefix is nested-tools-inner",
     ),
   ]
+  let rootOnly = devConfigured(workspace, run, "nested", "workspaceRoots = [\".\"]\n")
+  devListed(rootOnly, run, [], devLinks([outer]))
+  devRefused(
+    rootOnly,
+    run,
+    devWorkspaceCall("tools/inner", ["workdir"]),
+    "rust: no Cargo workspace is rooted at tools/inner",
+  )
+  passed += [
+    devHeld(
+      "nested: under workspaceRoots = [\".\"] the repository root is the only workspace, and "
+        + "tools/inner, a workspace below it, is not a workspace root",
+    ),
+  ]
   passed
 }
 

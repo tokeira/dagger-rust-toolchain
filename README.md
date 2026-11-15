@@ -601,7 +601,7 @@ assertion that does not hold.
 | `single-package` | A package at the repository root: its keys, the check addresses, and every setting. |
 | `workspace-members` | A workspace of several members: its keys, the `clippy` and `test` settings, and the toolchain and fetch layers. |
 | `two-workspaces` | Two workspaces in one repository: selection, the default volume prefixes, and separate inputs. |
-| `nested-workspaces` | A workspace in a directory of another. |
+| `nested-workspaces` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. |
 | `lint-lanes` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes. |
 | `build-lanes` | The recipe, the check flavour of the dependency layer, the check, clippy and doc lanes, and the settings `checkAllFeatures`, `checkNoDefaultFeatures`, `buildJobs` and `cargoEnvironment`. |
 | `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. |
