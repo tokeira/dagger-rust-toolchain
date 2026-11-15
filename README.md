@@ -241,6 +241,9 @@ A pattern of `test` or `clippy` selects a package directory and everything below
 `**` selects every package, a pattern that starts with `!` excludes, and an exclusion wins
 whatever the order. A package that the setting leaves out keeps its check, which passes
 without running. A pattern of `workspaceRoots` selects workspace roots by the same rules.
+The exception is `.`, the repository root, which selects the root alone and nothing below
+it, so `workspaceRoots = ["."]` checks the root workspace only. Write other patterns
+without a leading `./`: such a pattern matches no directory.
 
 ## Large workspaces
 
