@@ -117,6 +117,25 @@ let rustWithCrates(tool: Rust!, ctr: Container!, fetched: Container!): Container
     .withEnvVariable("CARGO_NET_OFFLINE", "true")
 }
 
+# A container with the variables of the cargoEnvironment setting, for the
+# steps that compile the workspace or run its tests: both flavours of the
+# dependency layer, the compile lanes, and a package's test run. A build
+# script and a test then read what the setting says, such as CI.
+#
+# A lane gives the variables to its toolchain layer before anything of its
+# own, so that what the module sets afterwards stands: the crates' offline
+# switch, the target directory, RUSTDOCFLAGS in the doc lane.
+#
+# The variables are part of each such step's key, like the job count below.
+# With no variable the container is as it was. The toolchain layer, the
+# recipe and the fetch layer never see them.
+let rustWithEnvironment(tool: Rust!, ctr: Container!): Container! {
+  tool.cargoEnvironment.reduce(ctr) { set, entry =>
+    let parts = entry.split("=", limit: 2)
+    set.withEnvVariable(parts[0]!, parts[1]!)
+  }
+}
+
 # A container with Cargo's job count from the buildJobs setting, for the
 # steps that compile: both flavours of the dependency layer, and the compile
 # lanes. Cargo reads CARGO_BUILD_JOBS, and so does every Cargo that a step

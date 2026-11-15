@@ -63,10 +63,10 @@ let rustTestCompiled(selection: RustPackages!): Container! {
     rustTestCargo(
       rustWithJobs(
         tool,
-        workspace.withCrates(selection.inputs, workspace.toolchainOf(
+        workspace.withCrates(
           selection.inputs,
-          [],
-        )),
+          rustWithEnvironment(tool, workspace.toolchainOf(selection.inputs, [])),
+        ),
       ),
     ),
     rustTestTargetDir,
@@ -203,9 +203,9 @@ let rustTestKept(outputs: Directory!, files: [String!]!): Directory! {
 }
 
 # The container a package's tests run in: the toolchain layer with the
-# crates, the package's view of the repository, and `kept`, the files of the
-# target directory that the run needs, at the paths the build left them. It
-# mounts no volume.
+# settings' environment and the crates, the package's view of the
+# repository, and `kept`, the files of the target directory that the run
+# needs, at the paths the build left them. It mounts no volume.
 let rustTestRunner(
   package: RustPackage!,
   selection: RustPackages!,
@@ -216,10 +216,13 @@ let rustTestRunner(
     workspace,
     package.inputs,
     rustTestCargo(
-      workspace.withCrates(package.inputs, workspace.toolchainOf(
+      workspace.withCrates(
         package.inputs,
-        [],
-      )),
+        rustWithEnvironment(workspace.tool, workspace.toolchainOf(
+          package.inputs,
+          [],
+        )),
+      ),
     ),
     rustTestView(package, selection),
   )

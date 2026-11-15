@@ -90,6 +90,11 @@ type Rust {
   buildJobs: Int
 
   """
+  Environment variables of the steps that compile or test, each as NAME=value.
+  """
+  cargoEnvironment: [String!]!
+
+  """
   Configured start of every cache volume's name. Null uses the workspace name.
   """
   volumePrefix: String
@@ -200,6 +205,13 @@ type Rust {
     """
     buildJobs: Int = null,
     """
+    Environment variables for the steps that compile the workspace or run
+    its tests, each as NAME=value, e.g. ["CI=1"]. A value is written in
+    dagger.toml and is part of each such step's key, so it must not be a
+    secret.
+    """
+    cargoEnvironment: [String!]! = [],
+    """
     Start of every cache volume's name. Defaults to the workspace name.
     """
     volumePrefix: String = null,
@@ -237,12 +249,17 @@ type Rust {
     """
     workspaceRoots: [String!]! = ["**"],
   ) {
+    let unnamed = cargoEnvironment.filter { entry =>
+      entry.hasPrefix("=") or entry.contains("=") == false
+    }
     if ((mountPath ?? "/").hasPrefix("/") == false) {
       raise "rust: mountPath must be an absolute container path: " + (mountPath ?? "")
     } else if (testRunner != "nextest" and testRunner != "cargo") {
       raise "rust: testRunner must be \"nextest\" or \"cargo\": " + testRunner
     } else if ((buildJobs ?? 1) == 0) {
       raise "rust: buildJobs must not be 0: Cargo runs no build with no job"
+    } else if (unnamed.length > 0) {
+      raise "rust: cargoEnvironment takes each variable as NAME=value: " + unnamed[0]!
     } else {
       self.image = image
       self.base = base
@@ -258,6 +275,7 @@ type Rust {
       self.target = target
       self.locked = locked
       self.buildJobs = buildJobs
+      self.cargoEnvironment = cargoEnvironment
       self.volumePrefix = volumePrefix
       self.test = test
       self.clippy = clippy

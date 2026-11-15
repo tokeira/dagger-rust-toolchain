@@ -76,8 +76,9 @@ let devTest(run: DevRun!): [String!]! {
   let alone = devTestAlone(run)
   let stubs = devTestStubs(run)
   let jobs = devTestJobs(run)
+  let environment = devTestEnvironment(run)
   let suite = devTestOverSuite(run)
-  runner + single + alone + stubs + jobs + suite
+  runner + single + alone + stubs + jobs + environment + suite
 }
 
 # The runner's pins. A run of the lane fetches the archive of the engine's
@@ -248,6 +249,36 @@ let devTestJobs(run: DevRun!): [String!]! {
         + "it with three jobs compiles in the container of the dependency layer's test flavour, "
         + "and its test build and doctests run and pass; under buildJobs = 2 the build script "
         + "says that Cargo ran it with two jobs, there and in the test build, which fails",
+    ),
+  ]
+}
+
+# The package that is built only where the environment has a variable, and
+# whose test fails unless its own environment has the same: the
+# cargoEnvironment setting reaches the test build and a package's run.
+let devTestEnvironment(run: DevRun!): [String!]! {
+  let root = {{directory: ".", name: "build-environment"}}
+  let workspace = devConsumer(run, "build-environment", devBuildOrigin(run.next))
+  let steps = devSteps(workspace, run, devTestChecks)
+  let check = "the tests of build-environment under cargoEnvironment"
+  devEach(devTestDependencies) { command =>
+    devStateOf(check, steps, command, "DONE")
+  }
+  devStateOf(check, steps, devTestBuild, "DONE")
+  devTestRunState(check, steps, root, "DONE")
+
+  let without = devConfigured(workspace, run, "build-environment", "")
+  let output = devTestFailure(without, run, devTestChecks)
+  let failed = "the tests of build-environment without cargoEnvironment"
+  devSays(failed, output, "rust: test failed in .:")
+  devSays(failed, output, devBuildUnset)
+  [
+    devHeld(
+      "build-environment: under cargoEnvironment = [\"" + devBuildVariable + "=<a value of "
+        + "the run>\"] the dependency layer's test flavour and the test build run for the new "
+        + "value, and the package's test, which fails unless its own environment has the value "
+        + "the build had, passes; without the setting the test build fails with the build "
+        + "script's message",
     ),
   ]
 }

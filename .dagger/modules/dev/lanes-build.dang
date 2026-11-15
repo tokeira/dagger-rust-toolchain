@@ -29,11 +29,12 @@ let devBuild(run: DevRun!): [String!]! {
   let check = devBuildCheck(run)
   let ends = devBuildEnds(run)
   let jobs = devBuildJobs(run)
+  let environment = devBuildEnvironment(run)
   let doc = devBuildDoc(run)
   let stale = devBuildStale(run)
   let signal = devBuildSignal(run)
   let layouts = devBuildLayouts(run)
-  dependencies + clippy + check + ends + jobs + doc + stale + signal + layouts
+  dependencies + clippy + check + ends + jobs + environment + doc + stale + signal + layouts
 }
 
 # Checks that the clippy check of a package reaches its lane: that the shared
@@ -704,6 +705,116 @@ let devBuildJobs(run: DevRun!): [String!]! {
   let none = devConfigured(workspace, run, "build-jobs", "buildJobs = 0\n")
   devRefused(none, run, ["call", "rust", "build-jobs"], "rust: buildJobs must not be 0")
   passed += [devHeld("build-jobs: buildJobs = 0 is refused")]
+  passed
+}
+
+# The variable that the build script of the fixture `build-environment`
+# needs, and what it says without it.
+let devBuildVariable: String! = "ACCEPTANCE_ORIGIN"
+
+let devBuildUnset: String! = "build-environment was built without ACCEPTANCE_ORIGIN"
+
+# The `cargoEnvironment` setting that gives the variable a value.
+let devBuildOrigin(value: String!): String! {
+  "cargoEnvironment = [\"" + devBuildVariable + "=" + value + "\"]\n"
+}
+
+# Checks that the environment a container's `env` printed has each of
+# `variables`, as `NAME=value`.
+let devBuildHasVariables(check: String!, printed: String!, variables: [String!]!): Void {
+  let lines = devLines(printed)
+  devEach(variables) { variable =>
+    if (lines.contains(variable) == false) {
+      raise devCheckFailed(check, "has no " + variable + ":\n" + devTail(printed))
+    }
+  }
+  null
+}
+
+# The package whose build script fails without a variable: the
+# cargoEnvironment setting reaches the dependency layer and the check, clippy
+# and doc lanes, changes no step before them, and leaves the module's own
+# variables as they are.
+let devBuildEnvironment(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "build-environment", "")
+
+  let check = "dagger check over build-environment, without cargoEnvironment"
+  let output = devFailing(workspace, run, devBuildChecks)
+  devSays(check, output, "rust: cargo check --no-default-features failed in .:")
+  devSays(check, output, devBuildUnset)
+  passed += [
+    devHeld(
+      "build-environment: without cargoEnvironment a package whose build script needs "
+        + devBuildVariable + " fails the check lane with the script's message",
+    ),
+  ]
+
+  # A value of this run: the steps that are keyed on it have not run.
+  let value = run.next
+  let given = devConfigured(workspace, run, "build-environment", devBuildOrigin(value))
+  let traced = devTraced(given, run, devBuildChecks)
+  let givenCheck = "dagger check over build-environment, under cargoEnvironment"
+  devEach(["cargo check --workspace"] + devBuildCommands) { command =>
+    devStateOf(givenCheck, traced, command, "DONE")
+  }
+  devEach(["cargo chef prepare", "cargo-chef chef cook --no-build", "cargo fetch"]) { command =>
+    devStateOf(givenCheck, traced, command, "CACHED")
+  }
+  passed += [
+    devHeld(
+      "build-environment: under cargoEnvironment = [\"" + devBuildVariable + "=<a value of "
+        + "the run>\"] the check, clippy and doc checks pass: the build script finds the "
+        + "variable in every lane; the dependency layer and the lanes run for the new value, "
+        + "and the recipe and the fetch layer stay cached",
+    ),
+  ]
+
+  # The module's own variables are set after the setting's.
+  let rival = devConfigured(
+    workspace,
+    run,
+    "build-environment",
+    "cargoEnvironment = [\"" + devBuildVariable + "=" + value
+      + "\", \"CARGO_TARGET_DIR=/elsewhere\", \"CARGO_NET_OFFLINE=false\"]\n",
+  )
+  let kept = [
+    devBuildVariable + "=" + value,
+    "CARGO_TARGET_DIR=" + devBuildTarget,
+    "CARGO_NET_OFFLINE=true",
+  ]
+  devBuildHasVariables(
+    "the dependency layer under a cargoEnvironment that names the module's variables",
+    devStdout(
+      rival,
+      run,
+      devWorkspaceCall(".", ["check-dependencies", "with-exec", "--args", "env", "stdout"]),
+    ),
+    kept,
+  )
+  devBuildHasVariables(
+    "the check lane under a cargoEnvironment that names the module's variables",
+    devStdout(
+      rival,
+      run,
+      devWorkspaceCall(".", ["compiled", "--lane", "check", "with-exec", "--args", "env", "stdout"]),
+    ),
+    kept,
+  )
+  let unnamed = devConfigured(workspace, run, "build-environment", "cargoEnvironment = [\"CI\"]\n")
+  devRefused(
+    unnamed,
+    run,
+    ["call", "rust", "cargo-environment"],
+    "rust: cargoEnvironment takes each variable as NAME=value: CI",
+  )
+  passed += [
+    devHeld(
+      "build-environment: a cargoEnvironment that names CARGO_TARGET_DIR and "
+        + "CARGO_NET_OFFLINE leaves both as the module sets them, in the dependency layer and "
+        + "in the check lane, beside its own variable; an entry without a value is refused",
+    ),
+  ]
   passed
 }
 
