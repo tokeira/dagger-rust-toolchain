@@ -1,10 +1,10 @@
 # Source layout and the lane contract
 
 A lane is one kind of work the module does for a Cargo workspace: fmt, clippy, test,
-check, deny or doc. The module's core gives each lane its name, its signature, its check
-address and its inputs. This page is what someone who changes a lane, or adds one, needs:
-the layout, what a lane receives, the rules every lane follows, the layers the lanes
-share, what each lane does, and the module's known limits.
+check, deny, advisories or doc. The module's core gives each lane its name, its signature,
+its check address and its inputs. This page is what someone who changes a lane, or adds
+one, needs: the layout, what a lane receives, the rules every lane follows, the layers
+the lanes share, what each lane does, and the module's known limits.
 
 ## Source layout
 
@@ -26,10 +26,10 @@ per lane.
 | `helper/` | The helper, `rust-lane-helper`: a Rust crate with no dependency, which a compile lane's step runs. |
 | `results.dang` | `RustLaneResults`: how a package's check reads its share of a shared step. |
 | `support.dang` | Paths, patterns and sorting. |
-| `lane-fmt.dang`, `lane-clippy.dang`, `lane-test.dang`, `lane-check.dang`, `lane-deny.dang`, `lane-doc.dang` | One lane each. |
-| `lane-test-runner.dang`, `lane-test-dependencies.dang` | The test lane's runner, cargo-nextest, and the test flavour of the dependency layer. |
+| `lane-fmt.dang`, `lane-clippy.dang`, `lane-test.dang`, `lane-check.dang`, `lane-deny.dang`, `lane-advisories.dang`, `lane-doc.dang` | One lane each. |
+| `lane-test-runner.dang`, `lane-test-dependencies.dang`, `lane-test-workspace.dang` | The test lane's runner, cargo-nextest, the test flavour of the dependency layer, and the run of a whole workspace's tests. |
 | `fixtures/` | Cargo layouts the acceptance runs over. |
-| `.dagger/modules/dev/` | The dev module, in Dang, and the workspace's main module: the acceptance, as nine checks, and the generator `dang-format`. |
+| `.dagger/modules/dev/` | The dev module, in Dang, and the workspace's main module: the acceptance, as ten checks, and the generator `dang-format`. |
 
 Every top-level name starts with `rust` or `Rust`, because all files share one namespace.
 A lane's own helpers and types start with the lane's name too: `rustClippyStep`,
@@ -50,6 +50,7 @@ The core calls each lane through one function. Its name and signature are fixed.
 | test | `rustTestLane(package: RustPackage!, selection: RustPackages!): Void` | `RustPackage.test(selection)` | `rust/workspaces/packages/test` |
 | check | `rustCheckLane(workspace: RustWorkspace!, inputs: RustInputs!): Void` | `RustWorkspace.check(ws)` | `rust/workspaces/check` |
 | deny | `rustDenyLane(workspace: RustWorkspace!, inputs: RustInputs!): Void` | `RustWorkspace.deny(ws)` | `rust/workspaces/deny` |
+| advisories | `rustAdvisoriesLane(workspace: RustWorkspace!, inputs: RustInputs!): Void` | `RustWorkspace.advisories(ws)` | `rust/workspaces/advisories` |
 | doc | `rustDocLane(workspace: RustWorkspace!, inputs: RustInputs!): Void` | `RustWorkspace.doc(ws)` | `rust/workspaces/doc` |
 
 The engine makes the `stale` check from the generator: it fails when `fmt` returns a
@@ -63,6 +64,12 @@ was prepared when the collection was made, in `RustInputs`. A workspace check ta
 
 Do not change a forwarder's name, arguments or docstring's first line without changing the
 acceptance: they are the module's public surface.
+
+The engine lists a module's checks and generators from its types, and expands a
+collection by its keys. A setting therefore cannot add a check or take one away: it can
+only change what a collection holds. The `wholeWorkspace` setting works that way. Under it
+a workspace's `packages` has one key, the workspace's root, and the three package lanes
+treat the item at that key as every member: "A whole workspace" below has the contract.
 
 ## What a lane receives
 
@@ -94,11 +101,13 @@ its path in the repository. None runs a container.
 | `fmtToolchainOf(inputs)` | The fmt toolchain layer: the `fmtToolchain` setting's toolchain, or the workspace's, with rustfmt. |
 | `fetchedOf(inputs)` | The fetch layer: `toolchainOf(inputs, [])` after `cargo fetch`, with the recipe mounted at `mountPath`. A workspace has one, and every lane takes its crates from it. |
 | `withCrates(inputs, ctr)` | `ctr` with the fetch layer's registry and git checkouts mounted in Cargo's home, and `CARGO_NET_OFFLINE=true`. |
+| `repositoryOf(ws)` | The repository as a whole workspace's test run sees it: every file at its path, without `.git`, ignored files and the workspace's `target`. It needs the `Workspace`, so `packages(ws)` prepares it, and only under `wholeWorkspace`. |
 
 ### `RustPackage` and `RustPackages`
 
 A `RustPackage` has `path` (its key), `name` (what `cargo -p` takes), `workspace` and
-`inputs`.
+`inputs`. Under `wholeWorkspace` it is the one item of its workspace: `whole` is true,
+`path` is the workspace's root, `name` is empty and `members` is every member.
 
 A `RustPackages` is the selection a package check receives.
 
@@ -107,8 +116,10 @@ A `RustPackages` is the selection a package check receives.
 | `paths` | The selected keys. The engine narrows this list. |
 | `members` | Every member of the workspace as `RustMember(path, name)`, selected or not. |
 | `narrowed` | Whether the selection left members out. |
-| `selected(patterns)` | The selected members that `patterns` select too, in key order. Pass `workspace.tool.clippy` or `workspace.tool.test`. |
+| `selected(patterns)` | The selected members that `patterns` select too, in key order. Pass `workspace.tool.clippy` or `workspace.tool.test`. Under `wholeWorkspace`, every member that `patterns` select. |
 | `packageFlags(patterns)` | `["--workspace"]` when nothing is left out, otherwise `-p <name>` for each member of `selected(patterns)`. It raises when nothing is selected: Cargo, given no package, would run on every member. |
+| `whole` | Whether the collection is one item that stands for every member: the `wholeWorkspace` setting. |
+| `repository` | `RustWorkspace.repositoryOf(ws)` under `wholeWorkspace`, and otherwise an empty directory. |
 | `workspace`, `inputs` | As above. |
 
 ### `Rust`, the settings
@@ -117,6 +128,16 @@ A `RustPackages` is the selection a package check receives.
 the rest. `workspace.tool.cargoFlags` is the list every Cargo build command gets:
 `--locked`, `--profile`, `--target` and the feature flags. Add the package selection
 yourself.
+
+Two settings reach a step through its container, not its command, with two functions of
+`layers.dang`:
+
+| Function | Gives | For |
+| --- | --- | --- |
+| `rustWithEnvironment(tool, ctr)` | `ctr` with the variables of `cargoEnvironment`. | A step that compiles the workspace or runs its tests. |
+| `rustWithJobs(tool, ctr)` | `ctr` with `CARGO_BUILD_JOBS` under `buildJobs`. | A step that compiles. |
+
+With neither setting the container is as it was, so no step has a new key.
 
 ### Helpers in `support.dang`
 
@@ -140,6 +161,29 @@ The toolchain layer keeps the toolchain files at their paths under `mountPath`, 
 working directory is `workdir`. rustup therefore selects the workspace's toolchain there,
 with or without a view mounted. Under the `toolchain` or `fmtToolchain` setting the layer
 sets `RUSTUP_TOOLCHAIN` instead, which outranks the files.
+
+A step that compiles the workspace or runs its tests gives its toolchain layer the
+settings' environment first, and one that compiles the job count last:
+
+```dang
+let lane = rustWithJobs(
+  workspace.tool,
+  workspace.withCrates(
+    inputs,
+    rustWithEnvironment(workspace.tool, workspace.toolchainOf(inputs, components)),
+  ),
+)
+```
+
+The order matters. Whatever the lane sets after `rustWithEnvironment` stands: the offline
+switch of `withCrates`, the target directory, the doc lane's `RUSTDOCFLAGS`, the job
+count. `rustDependenciesLane` and `rustTestBuilder` do this for the compile lanes. The
+toolchain layer, the recipe and the fetch layer take neither, so a change to either
+setting leaves them cached, and runs again exactly the steps that compile or test. Both
+flavours of the dependency layer take both: a lane must run as its layer did.
+
+`cargoEnvironment` is no place for a secret. Its values are written in `dagger.toml`, are
+part of step keys, and show in traces.
 
 `withCrates` keeps Cargo off the network. A step that needs a crate the fetch layer did
 not download fails and says so. Do not turn the network back on, and do not fetch again:
@@ -332,7 +376,7 @@ volume:
 | Toolchain | `toolchainOf`, `fmtToolchainOf` | The image, `systemPackages`, `rustup toolchain install`, the `target`, the components | The image, `systemPackages`, the toolchain files or settings, `target`, the components |
 | Recipe | `recipeOf` | `cargo chef prepare` over the skeleton, then `cargo-chef chef cook --no-build` from the document it wrote | What the document says |
 | Fetch | `fetchedOf` | `cargo fetch` over the recipe | The toolchain layer, the recipe, `locked` |
-| Dependencies, check flavour | `rustDependenciesLayer` | `cargo check` over the recipe in each shape a lane runs, then `cargo clean -p` | The fetch layer, and the settings that change compilation |
+| Dependencies, check flavour | `rustDependenciesLayer` | `cargo check` over the recipe in each shape a lane runs, then `cargo clean -p` | The fetch layer, the settings that change compilation, and `buildJobs` and `cargoEnvironment` |
 | Dependencies, test flavour | `rustTestDependencies` | `cargo build --tests` over the recipe, then `cargo clean -p` | The toolchain layer, the fetch layer, the recipe, and the same settings |
 
 ### The recipe
@@ -393,7 +437,8 @@ under each feature set of `sets`.
   that runs Cargo in a shape the layer did not run compiles the difference itself, on
   every run. Add a shape to the layer when you add one to a lane. `sets` is how the
   check lane adds its own without the clippy and doc lanes waiting for them, or failing
-  with them: the layers share their first steps.
+  with them: the layers share their first steps. The check lane passes the ends it runs,
+  and nothing when it runs none: its one command is then of the second shape.
 - A check, clippy or doc lane starts from `rustDependenciesLane(workspace, inputs, lane,
   components, dependencies, marks)`: `toolchainOf(inputs, components)`, the fetch layer's
   crates in Cargo's home with Cargo kept off the network, and the lane's two volumes,
@@ -605,6 +650,10 @@ It needs no crate and no lockfile, so it does not call `withCrates`. The changes
 package's `.rs` files after the step against the same files before it, both at their
 repository paths.
 
+For a whole workspace the lane runs the same step for each member, and returns one
+changeset: every member's `.rs` files after its step, against the same files before. An
+edit to one package still formats that package alone.
+
 Measured on `v1.0.0-beta.27`:
 
 - An edit to a package's Rust file runs that package's step and leaves the others `CACHED`.
@@ -640,14 +689,27 @@ When the command fails, `rustClippyReports` gives each covered package:
   failed, or Cargo stopping before it compiled anything;
 - nothing, and the package passes, when every error is in a member it does not need.
 
+For a whole workspace `rustClippyWorkspace` reads the same step, with the same command,
+marks and volumes, so the engine answers it from the packages' run where it has one. The
+one check fails when any covered package has a text, with each such package's directory
+and its text. Its verdict is the packages' verdicts taken together.
+
 ### check and doc
 
 `rustCheckLane` runs `cargo check --quiet --workspace` under `--no-default-features` and
-under `--all-features`, the two ends of the feature space that clippy does not reach. It
-leaves an end out when the settings already put clippy there, and passes those sets to
-the dependency layer as `sets`. Each set is a step of its own in the lane's volumes
-(`rustCheckRun`), and each syncs the mirror for itself. Cargo keeps what it compiled
-under one set apart from the other, so both stay warm in the one target volume.
+under `--all-features`, the two ends of the feature space that clippy does not reach.
+`rustCheckEnds` leaves an end out when the settings already put clippy there, and when
+its own setting is off: `checkNoDefaultFeatures` or `checkAllFeatures`. The lane passes
+the ends to the dependency layer as `sets`. Each set is a step of its own in the lane's
+volumes (`rustCheckRun`), and each syncs the mirror for itself. Cargo keeps what it
+compiled under one set apart from the other, so both stay warm in the one target volume.
+
+When no end is left, `rustCheckSets` gives one set: the settings' own feature flags. The
+lane then runs `cargo check --quiet --workspace` under them, which is the dependency
+layer's second shape. A lane that ran nothing would pass, and a `check` that passed would
+then say nothing about the workspace. This way a pass always means a build. The command
+repeats part of what clippy compiles. A repository that wants no `check` skips it in
+`dagger.toml` (`check.skip = ["workspaces/check"]`), which takes it off the list.
 
 `rustDocLane` runs `cargo doc --quiet --workspace --no-deps` with `RUSTDOCFLAGS="-D
 warnings"`, in the lane's volumes (`rustDocRun`). rustdoc runs again for every member
@@ -659,26 +721,49 @@ Both raise on any exit code but 0, with Cargo's `stderr`.
 ### deny
 
 `rustDenyLane` returns `null` unless `inputs.source` has a `deny.toml` in the workspace
-root. Otherwise it runs one step, `cargo deny [flags] check --disable-fetch`, in
-`withCrates(inputs, toolchainOf(inputs, []))`:
+root (`rustDenyApplies`). Otherwise it runs one step, `cargo deny [flags] check
+--disable-fetch bans licenses sources`, in `rustDenyContainer`:
 
+- **The container** is `withCrates(inputs, toolchainOf(inputs, []))` with cargo-deny and
+  the mount below. It holds no advisory database, so the step is keyed on the repository
+  alone.
 - **cargo-deny** comes from `http` with a checksum and `File.extract`, with no container
   command, and is copied to `bin` in Cargo's home, where Cargo finds subcommands.
+- **The mount** is the skeleton with `inputs.source` laid over it, without its `.rs` files.
+  With `locked` off, the `Cargo.lock` is the fetch layer's.
+
+`rustDenyCommand(tool, checks)` is the command for some of cargo-deny's checks, and
+`rustDenyFailure(workspace, checks, ran)` the message: `rust: cargo deny check <checks>
+failed in <root>:`, then cargo-deny's `stderr` and `stdout`.
+
+### advisories
+
+`rustAdvisoriesLane` applies where the deny lane does. It runs `cargo deny [flags] check
+--disable-fetch advisories` in the deny lane's container, with the database mounted:
+
 - **The advisory database** is `git(...).head(noLock: true).tree`, mounted where
   cargo-deny keeps it: `advisory-dbs/advisory-db-3157b0e258782691` in Cargo's home. The
   directory's name is cargo-deny's, a hash of the address. `noLock` makes the engine
   resolve the branch on every run, and write nothing to the repository's `dagger.lock`.
   The tree keeps its `.git` directory, which cargo-deny opens.
-- **The mount** is the skeleton with `inputs.source` laid over it, without its `.rs` files.
-  With `locked` off, the `Cargo.lock` is the fetch layer's.
+- **It is a lane of its own because of that input.** The database is the one thing a
+  cargo-deny check reads that is not in the repository, so this step alone runs again,
+  and can fail, when nothing in the repository changed. Keep it apart: a check added to
+  `rustDenyChecks` must read the workspace and its crates only.
+- cargo-deny 0.19.9 refuses a database whose last commit is more than 90 days old
+  (`repository is stale`). The branch's head never is, and the acceptance uses the refusal
+  to show which commit the step read.
 
 Measured on `v1.0.0-beta.27`:
 
-- Every run resolves the database's branch with `git ls-remote`. The tree of a commit the
-  engine has fetched is `CACHED`.
-- A second run, and a run after an edit to a Rust file, leave `cargo deny` `CACHED`.
-- An edit to `deny.toml`, or a new file that is not Rust source, runs it again and leaves
-  `cargo fetch` `CACHED`.
+- Every run of `advisories` resolves the database's branch with `git ls-remote`. The tree
+  of a commit the engine has fetched is `CACHED`.
+- A second run, and a run after an edit to a Rust file, leave both `cargo deny` commands
+  `CACHED`.
+- An edit to `deny.toml`, or a new file that is not Rust source, runs both again and
+  leaves `cargo fetch` `CACHED`.
+- With the database at another commit, `cargo deny ... advisories` runs again and
+  `cargo deny ... bans licenses sources` stays `CACHED`.
 
 ### test
 
@@ -763,8 +848,83 @@ package's position, and ends with `RustLaneResults.assertPassed` like clippy.
   acceptance. A share without the report's `test result:` line is therefore not taken
   for the whole: the package gets the step's whole output instead.
 
+### A whole workspace
+
+Under `wholeWorkspace`, `RustWorkspace.packages` returns a collection with one key, the
+workspace's root. The item there is a `RustPackage` with `whole` true, and each package
+lane reads it as every member:
+
+| Lane | For the one item |
+| --- | --- |
+| fmt | Each member's own step, and one changeset: "fmt" above. |
+| clippy | The shared step, read for every covered package: "clippy" above. |
+| test | One run of the tests, then the doctests: `lane-test-workspace.dang`, below. |
+
+`selected` and `packageFlags` ignore the selection there, which can only hold the one
+key: the `clippy` and `test` settings alone choose the members, and a command names them
+all with `--workspace` or the chosen ones with `-p`. `RustPackage.leftOut` skips the item
+when a setting leaves every member out. A lane must not read `package.name` or use
+`package.path` as a package's directory before it has looked at `package.whole`.
+
+**The tests of a whole workspace** run in the test lane's container and volumes, which
+`rustTestBuilder(workspace, inputs, view)` makes for the test build too. Here `view`, the
+directory the mirror is made equal to, is `selection.repository`.
+
+| Step | Function | Keyed on |
+| --- | --- | --- |
+| The run | `rustTestWorkspaceRun(selection)`: `cargo nextest run`, or `cargo test`, over `selection.packageFlags(tool.test)` | The dependency layer, the repository, the settings |
+| The doctests, under nextest | `rustTestWorkspaceDoctests(selection)`: `cargo test --doc`, in the run's container | The run |
+
+- **One step builds and runs.** The tests run where the volumes are mounted, so nothing
+  is copied out, no step reads a package's files apart, and no run is cached for a
+  package whose files did not change. That is the price of a run that sees everything.
+- **The mirror is the writable copy.** Tests read and write the mirror at `mountPath`,
+  where the whole repository is. The next step's sync removes what they wrote.
+- **The target directory is an argument, not a variable.** The lane's container sets
+  `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR`, which the helper reads. The commands
+  start with `env -u CARGO_TARGET_DIR -u CARGO_BUILD_BUILD_DIR` and take `--target-dir`
+  and `--config build.build-dir=...` instead. With the variables, a Cargo that a test
+  starts would build in the lane's target volume, and a test that looks for its build's
+  output in the project's own `target` would not find it (seen with the fixture
+  `test-whole`). The other variables stay: such a Cargo is off the network, with the
+  fetch layer's crates in Cargo's home, and under `buildJobs`.
+- **The runner's arguments.** `--no-fail-fast` under both runners. Under nextest also
+  `--failure-output immediate-final`, so that the end of the report, which is what the
+  message keeps, has what each failed test printed, and `--no-tests pass`. Arguments
+  outrank the workspace's `.config/nextest.toml`, which is otherwise in force.
+- **`cargo test` runs the doctests itself**, so under `testRunner = "cargo"` there is one
+  step.
+- **The message** is `rust: test failed in <root>:` and the end of each failed command's
+  output. A doctest command that finds no library target passes, as for a package.
+
+**`.git` is not in the repository view**, by choice. What was found on `v1.0.0-beta.27`:
+
+- A local workspace's `ws.directory("/")` has the checkout's `.git` directory (measured).
+  A checkout that is a Git worktree has a `.git` file instead, which the engine drops
+  (`core/schema/workspace.go`, `resolveRootfs`; read, not run).
+- A workspace loaded from Git has none: under `dagger -W github.com/dagger/go`,
+  `ws.directory("/")` held no `.git` (measured). The engine takes the commit's tree with
+  `discardGitDir` (`core/workspace_remote.go`, `CloneWorkspaceGitTree`).
+- `ws.git.directory` returns Git metadata for the workspace's HEAD in both cases
+  (measured: it lists `HEAD`, `objects`, `refs`), which the engine documents as fit to
+  mount at `.git`. The module does not use it.
+
+With `.git` a local run would differ from one loaded from Git, and would be keyed on every
+commit, fetch and index write. So `repositoryOf` leaves it out, and a test finds no
+repository around it in either case. `git` the program is in the image.
+
 ## Known limits
 
+- **A whole workspace's run is not cached by package.** Under `wholeWorkspace` any edit
+  to the repository runs every selected package's tests again. What a test writes into
+  the tree, a nested build's `target` directory too, is removed by the next step's sync,
+  so a test that builds a project in the tree builds it from nothing whenever the run
+  runs again.
+- **A test that a signal stops is taken for a build that was killed.** The whole run is
+  one step, kept or run once more as `rustDependenciesRan` says. Under `cargo test`,
+  which reports a test binary that a signal stopped as Cargo reports a compiler, the step
+  runs once more, and the check then fails with the step's whole output and is not kept.
+  Not measured.
 - **clippy under a `target` setting can pass a package unchecked.** A member that Cargo
   compiles both for the host, as a build-dependency, and for the target has one package
   id in Cargo's `compiler-artifact` messages. `rustClippyBuilt` in `lane-clippy.dang`
@@ -820,12 +980,12 @@ package's position, and ends with `RustLaneResults.assertPassed` like clippy.
 - **Packages that are not members get conventional stubs only.** A package that
   `includeExtraFiles` brings in has an empty file for each conventional target path in
   the skeleton and the recipe. A target at a path its manifest names is not there.
-- **The deny acceptance reads the live RustSec database.** The engine fetches
+- **The advisories acceptance reads the live RustSec database.** The engine fetches
   `https://github.com/RustSec/advisory-db` at its default branch on every run, so the
   acceptance can change between runs with no change to the module: the assertion that
   the `flagged` fixture fails names RUSTSEC-2020-0095 and fails if RustSec withdraws that
-  advisory, and an assertion that two runs share a cached `cargo deny` fails if RustSec
-  publishes between them.
+  advisory, and an assertion that two runs share a cached `cargo deny ... advisories`
+  fails if RustSec publishes between them. The deny lane's assertions read no database.
 
 ## Acceptance
 
@@ -841,11 +1001,12 @@ assertion that does not hold.
 | `workspace-members` | `devCoreMembers`, in `core.dang` | The collections of a workspace of several members, the `clippy` and `test` settings, and the toolchain and fetch layers. | `members` |
 | `two-workspaces` | `devCorePair`, in `core.dang` | Two workspaces in one repository: selection, default volume prefixes, and separate inputs. | `pair` |
 | `nested-workspaces` | `devCoreNested`, in `core.dang` | A workspace in a directory of another. | `nested` |
-| `lint-lanes` | `devLint`, in `lanes-lint.dang` | The `workspaceRoots` setting, and the fmt and deny lanes. | `single`, and those whose names start `lint-` |
-| `build-lanes` | `devBuild`, in `lanes-build.dang` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. | `members`, `single`, `pair`, `nested`, and those whose names start `build-` |
-| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. | `single`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside` |
+| `lint-lanes` | `devLint`, in `lanes-lint.dang` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes: what each of the two cargo-deny checks rejects, and that a moved advisory database runs `advisories` again and leaves `deny` cached. | `single`, and those whose names start `lint-` |
+| `build-lanes` | `devBuild`, in `lanes-build.dang` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. The settings `checkAllFeatures` and `checkNoDefaultFeatures`, and what the check lane runs with both off. `buildJobs` and `cargoEnvironment`, in the dependency layer and in the three lanes. | `members`, `single`, `pair`, `nested`, and those whose names start `build-` |
+| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. | `single`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
 | `cache-volumes` | `devCache`, in `lanes-cache.dang` | The helper's own tests, and the compile lanes' volumes: their names, what a lane compiles over empty volumes, after a one-file edit and after a change to the dependency layer, that a deleted file is gone, and that verdicts over warm volumes and over empty ones agree. | `test-suite`, `pair`, `build-lints`, `build-stale` |
-| `shared-layers` | `devCoreShared`, in `core.dang` | That the six lanes of a workspace share one recipe and one fetch. | `lint-deny` |
+| `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; the one clippy check and the one fmt generator. | `test-whole`, `build-lints`, `lint-fmt` |
+| `shared-layers` | `devCoreShared`, in `core.dang` | That the seven lanes of a workspace share one recipe and one fetch. | `lint-deny` |
 
 `dev.dang` holds the checks themselves, on `Dev`, and the generator `dang-format`.
 `harness.dang` holds what every file uses.
@@ -935,6 +1096,13 @@ No check is cached: each is declared `@cache(policy: FunctionCachePolicy.NEVER)`
 verdict depends on the engine in hand and, for `lint-lanes` and `shared-layers`, on
 RustSec's database of the moment, and neither is among the inputs the engine would key
 a cached verdict on.
+
+Three fixtures prove a setting by failing without it. The build script of `build-jobs`
+fails unless Cargo's `NUM_JOBS` is the count in its `jobs.txt`. That of
+`build-environment` fails without a variable, and its test fails unless its own
+environment has the value the build had. The tests of `test-whole` read a file of another
+member and one outside the workspace, write into the repository, run `git`, and build a
+project there with `cargo`.
 
 No check asks which engine runs it. Each drives the module with the `v1.0.0-beta.27`
 CLI, pinned by checksum for `linux/amd64` and `linux/arm64`, on the engine that runs
