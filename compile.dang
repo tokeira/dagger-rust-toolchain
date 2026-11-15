@@ -196,7 +196,8 @@ let rustCompileCargo(
 
 # A compile lane's step over every package that the lane's setting selects,
 # for whoever inspects it: the container after the lane's last Cargo
-# command, with the helper's report at rustCompileReport.
+# command, with the helper's report at rustCompileReport. Under the
+# wholeWorkspace setting the test lane's step is the run of the tests.
 let rustCompileStep(
   workspace: RustWorkspace!,
   selection: RustPackages!,
@@ -209,7 +210,7 @@ let rustCompileStep(
   } else if (lane == "doc") {
     rustDocRun(workspace, selection.inputs)
   } else if (lane == "test") {
-    rustTestCompiled(selection)
+    if (selection.whole) { rustTestWorkspaceRun(selection) } else { rustTestCompiled(selection) }
   } else {
     raise "rust: no compile lane is named " + lane + ": the lanes are check, clippy, doc and test"
   }

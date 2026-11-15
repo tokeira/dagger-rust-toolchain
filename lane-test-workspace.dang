@@ -1,0 +1,102 @@
+# The test lane under the wholeWorkspace setting: one run of the tests of
+# every package that the test setting selects, then their doctests, over a
+# writable copy of the whole repository. docs/lanes.md has the contract.
+#
+#   run       `cargo nextest run`, or `cargo test` under testRunner =
+#             "cargo", builds the test binaries and runs them, in one step,
+#             in the lane's own volumes: the target directory that starts
+#             from the dependency layer, and the mirror, which here is of
+#             the whole repository. A test reads any file of the repository
+#             there, and writes where it likes: the next step's sync puts
+#             the mirror back as the repository has it.
+#   doctests  `cargo test --doc` in the same container and volumes, as a
+#             step that syncs for itself. `cargo test` runs the doctests
+#             itself, so under testRunner = "cargo" there is no such step.
+#
+# Everything that touches the volumes is in those steps, so nothing is
+# copied out of them, and no step is keyed on a package's files alone: the
+# run is keyed on the repository, and runs again after any edit to it.
+#
+# The Cargo commands take the target directory as arguments. The lane's
+# container has it in its environment, where a Cargo that a test starts
+# would find it too, and build into the lane's volume in place of its own
+# target directory. `env` takes it out of the commands' environment.
+
+# The arguments that give a Cargo command the lane's target directory, and
+# keep the build directory there, as the dependency layer has them.
+let rustTestWorkspaceTarget: [String!]! = [
+  "--target-dir", rustTestTargetDir,
+  "--config", "build.build-dir='" + rustTestTargetDir + "'",
+]
+
+# How a command starts whose environment must not name the target directory.
+let rustTestWorkspaceClear: [String!]! = ["env", "-u", "CARGO_TARGET_DIR", "-u", "CARGO_BUILD_BUILD_DIR"]
+
+# The run: one command builds and runs the tests of the packages that the
+# test setting selects, under the helper, which syncs the mirror of the
+# repository first.
+#
+# Both runners run every test, whatever fails. cargo-nextest shows what each
+# failed test printed once more at the end of its report, which is the part
+# a check's message keeps, and passes a workspace that has no test.
+let rustTestWorkspaceRun(selection: RustPackages!): Container! {
+  let workspace = selection.workspace
+  let tool = workspace.tool
+  let build = rustTestBuilder(workspace, selection.inputs, selection.repository)
+  if (tool.testRunner == "cargo") {
+    rustCompileCargo(
+      workspace,
+      build,
+      rustTestWorkspaceClear + ["cargo", "test", "--no-fail-fast"] + tool.cargoFlags
+        + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
+      "",
+      [],
+    )
+  } else {
+    rustCompileCargo(
+      workspace,
+      rustTestWithNextest(tool, build),
+      rustTestWorkspaceClear
+        + ["cargo", "nextest", "run", "--no-fail-fast", "--failure-output", "immediate-final"]
+        + ["--no-tests", "pass"] + rustTestNextestFlags(tool) + selection.packageFlags(tool.test)
+        + rustTestWorkspaceTarget,
+      "",
+      [],
+    )
+  }
+}
+
+# The doctests of the same packages, after a cargo-nextest run: in the run's
+# container, as a step that syncs the mirror for itself.
+let rustTestWorkspaceDoctests(selection: RustPackages!): Container! {
+  let tool = selection.workspace.tool
+  rustCompileCargo(
+    selection.workspace,
+    rustTestWorkspaceRun(selection),
+    rustTestWorkspaceClear + ["cargo", "test", "--doc", "--no-fail-fast"] + tool.cargoFlags
+      + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
+    "",
+    [],
+  )
+}
+
+# What to tell the user of a whole workspace's tests, or "" when they pass:
+# the end of the report of each command that failed. A doctest command that
+# found no library to test has no doctest to run, and passes.
+let rustTestWorkspaceFailure(selection: RustPackages!): String! {
+  let none: [String!]! = []
+  let ran = rustTestWorkspaceRun(selection)
+  let run = if (ran.exitCode == 0) { none } else { [rustTestTail(ran.stdout + ran.stderr)] }
+  if (selection.workspace.tool.testRunner == "cargo") {
+    run.join("\n")
+  } else {
+    let doctests = rustTestWorkspaceDoctests(selection)
+    let errors = doctests.stderr
+    let bare = errors.split("\n").any { line =>
+      line.hasPrefix("error: no library targets found in package")
+    }
+    if (doctests.exitCode == 0 or bare) { run.join("\n") } else {
+      (run + [rustTestTail(doctests.stdout + errors)]).join("\n")
+    }
+  }
+}

@@ -38,6 +38,42 @@ let rustTestNextestFlags(tool: Rust!): [String!]! {
   tool.cargoFlags.map { flag => if (flag == "--profile") { "--cargo-profile" } else { flag } }
 }
 
+# The container of the lane's Cargo commands that compile: the toolchain
+# layer with the settings' environment, the crates, the test lane's own
+# environment and the job count, as a compile lane's container. Its target
+# volume starts from the dependency layer's test flavour, and its mirror is
+# of `view`: the workspace's source, or under the wholeWorkspace setting the
+# repository.
+let rustTestBuilder(
+  workspace: RustWorkspace!,
+  inputs: RustInputs!,
+  view: Directory!,
+): Container! {
+  let tool = workspace.tool
+  rustCompileLane(
+    workspace,
+    RustInputs(
+      toolchainFiles: inputs.toolchainFiles,
+      manifests: inputs.manifests,
+      targets: inputs.targets,
+      source: view,
+      formatFiles: inputs.formatFiles,
+    ),
+    "test",
+    rustTestCargo(
+      rustWithJobs(
+        tool,
+        workspace.withCrates(inputs, rustWithEnvironment(
+          tool,
+          workspace.toolchainOf(inputs, []),
+        )),
+      ),
+    ),
+    rustTestTargetDir,
+    rustTestDependencies(workspace, inputs).directory(rustTestTargetDir),
+  )
+}
+
 # The shared test build: one Cargo command over the selected packages, in
 # the lane's volumes. It is a function of the inputs, the settings and the
 # selection only.
@@ -56,22 +92,7 @@ let rustTestNextestFlags(tool: Rust!): [String!]! {
 let rustTestCompiled(selection: RustPackages!): Container! {
   let workspace = selection.workspace
   let tool = workspace.tool
-  let build = rustCompileLane(
-    workspace,
-    selection.inputs,
-    "test",
-    rustTestCargo(
-      rustWithJobs(
-        tool,
-        workspace.withCrates(
-          selection.inputs,
-          rustWithEnvironment(tool, workspace.toolchainOf(selection.inputs, [])),
-        ),
-      ),
-    ),
-    rustTestTargetDir,
-    rustTestDependencies(workspace, selection.inputs).directory(rustTestTargetDir),
-  )
+  let build = rustTestBuilder(workspace, selection.inputs, selection.inputs.source)
   if (tool.testRunner == "cargo") {
     rustCompileCargo(
       workspace,
@@ -431,13 +452,23 @@ let rustTestFailure(package: RustPackage!, selection: RustPackages!): String! {
 }
 
 # Fails when the test build fails, or one of a package's tests or doctests.
+# Under the wholeWorkspace setting the package is the whole workspace, whose
+# tests run together: lane-test-workspace.dang.
 let rustTestLane(package: RustPackage!, selection: RustPackages!): Void {
-  let covered = selection.selected(package.workspace.tool.test)
-  let position = covered.filter { member => member.path < package.path }.length
-  let results = if (covered.any { member => member.path == package.path }) {
-    directory.withNewFile(`${position}`, rustTestFailure(package, selection))
+  if (package.whole) {
+    let failure = rustTestWorkspaceFailure(selection)
+    if (failure != "") {
+      raise "rust: test failed in " + package.path + ":\n" + failure
+    }
+    null
   } else {
-    directory
+    let covered = selection.selected(package.workspace.tool.test)
+    let position = covered.filter { member => member.path < package.path }.length
+    let results = if (covered.any { member => member.path == package.path }) {
+      directory.withNewFile(`${position}`, rustTestFailure(package, selection))
+    } else {
+      directory
+    }
+    RustLaneResults(lane: "test", covered: covered, results: results).assertPassed(package.path)
   }
-  RustLaneResults(lane: "test", covered: covered, results: results).assertPassed(package.path)
 }

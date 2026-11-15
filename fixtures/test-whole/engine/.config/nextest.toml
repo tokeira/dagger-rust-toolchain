@@ -1,0 +1,5 @@
+# What cargo-nextest reads at the workspace root. It leaves one test out of
+# every run: the test fails under cargo-nextest, so a run passes only where
+# this file is in force.
+[profile.default]
+default-filter = "not test(=left_out_by_the_nextest_configuration)"

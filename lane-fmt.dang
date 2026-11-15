@@ -1,5 +1,6 @@
 # The fmt lane: `cargo fmt -p <package>` under the fmt toolchain layer, one
-# step per package. docs/lanes.md has the contract.
+# step per package. Under the wholeWorkspace setting the workspace's one
+# generator joins every package's changes. docs/lanes.md has the contract.
 #
 # A package's step runs over the workspace's skeleton and the package's own
 # Rust files, so an edit to another package leaves it cached. `cargo fmt`
@@ -80,12 +81,38 @@ let rustFmtStep(package: RustPackage!): Container! {
     .withExec(["cargo", "fmt", "-p", package.name], expect: ANY)
 }
 
-# The changes rustfmt makes to a package's files.
-let rustFmtLane(package: RustPackage!): Changeset! {
+# A package's Rust files as rustfmt leaves them, at their repository paths.
+let rustFmtFormatted(package: RustPackage!): Directory! {
   let ran = rustFmtStep(package)
   if (ran.exitCode != 0) {
     raise "rust: cargo fmt failed in " + package.path + ":\n" + ran.stderr
   }
   rustFmtRustFiles(package, ran.directory(package.workspace.mountPath))
-    .changes(rustFmtRustFiles(package, package.inputs.source))
+}
+
+# The changes rustfmt makes to a package's files. Under the wholeWorkspace
+# setting the package is the whole workspace: the changes are those of every
+# member, each formatted by its own step, as one changeset.
+let rustFmtLane(package: RustPackage!): Changeset! {
+  if (package.whole) {
+    let none: [RustMember!]! = []
+    let members = package.members.map { member =>
+      RustPackage(
+        path: member.path,
+        name: member.name,
+        workspace: package.workspace,
+        inputs: package.inputs,
+        members: none,
+      )
+    }
+    let formatted = members.reduce(directory) { files, member =>
+      files.withDirectory("/", rustFmtFormatted(member))
+    }
+    let before = members.reduce(directory) { files, member =>
+      files.withDirectory("/", rustFmtRustFiles(member, member.inputs.source))
+    }
+    formatted.changes(before)
+  } else {
+    rustFmtFormatted(package).changes(rustFmtRustFiles(package, package.inputs.source))
+  }
 }

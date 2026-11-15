@@ -24,11 +24,15 @@ type RustMember {
 """
 The member packages of one Cargo workspace, keyed by directory.
 
-Directories are relative to the repository root.
+Directories are relative to the repository root. Under the wholeWorkspace
+setting the collection has one item, keyed by the workspace root, which
+stands for every member.
 """
 type RustPackages @collection {
   """
   Package directories, relative to the repository root.
+
+  Under the wholeWorkspace setting, the workspace root alone.
   """
   paths: [String!]! @keys
 
@@ -44,6 +48,10 @@ type RustPackages @collection {
   let workspace: RustWorkspace!
   let inputs: RustInputs!
 
+  # The repository's files, which a whole-workspace test run sees: under the
+  # wholeWorkspace setting RustWorkspace.repositoryOf, and otherwise empty.
+  let repository: Directory!
+
   """
   Whether the selection left packages of the workspace out.
   """
@@ -51,11 +59,16 @@ type RustPackages @collection {
     delta == null or delta!.addedKeys.length > 0 or delta!.removedKeys.length > 0
   }
 
+  # Whether the collection is one item that stands for every member: the
+  # wholeWorkspace setting.
+  let whole: Boolean! { workspace.tool.wholeWorkspace }
+
   # The selected members that patterns select too, in key order: the packages
-  # a lane's shared step covers.
+  # a lane's shared step covers. The one item of a whole workspace selects
+  # every member.
   let selected(patterns: [String!]!): [RustMember!]! {
     members.filter { member =>
-      paths.contains(member.path) and rustSelects(patterns, member.path)
+      (whole or paths.contains(member.path)) and rustSelects(patterns, member.path)
     }
   }
 
@@ -69,7 +82,7 @@ type RustPackages @collection {
     if (chosen.length == 0) {
       raise "rust: no package of the workspace " + workspace.path + " is selected"
     }
-    if (narrowed == false and chosen.length == members.length) {
+    if ((whole or narrowed == false) and chosen.length == members.length) {
       ["--workspace"]
     } else {
       chosen.reduce(none) { flags, member => flags + ["-p", member.name] }
@@ -78,46 +91,80 @@ type RustPackages @collection {
 
   """
   The package in this directory.
+
+  Under the wholeWorkspace setting, the item at the workspace root: every
+  member as one.
   """
   package(path: String!): RustPackage! @get {
-    RustPackage(
-      path: path,
-      name: members.filter { member => member.path == path }[0]!.name,
-      workspace: workspace,
-      inputs: inputs,
-    )
+    let none: [RustMember!]! = []
+    if (whole) {
+      RustPackage(path: path, name: "", workspace: workspace, inputs: inputs, members: members)
+    } else {
+      RustPackage(
+        path: path,
+        name: members.filter { member => member.path == path }[0]!.name,
+        workspace: workspace,
+        inputs: inputs,
+        members: none,
+      )
+    }
   }
 }
 
 """
 A Cargo package.
+
+Under the wholeWorkspace setting it is the one item of its workspace, at the
+workspace root, and stands for every member.
 """
 type RustPackage {
   """
   Package directory, relative to the repository root.
+
+  Under the wholeWorkspace setting, the workspace root.
   """
   path: String!
 
   """
-  Package name.
+  Package name. Empty under the wholeWorkspace setting.
   """
   name: String!
 
   let workspace: RustWorkspace!
   let inputs: RustInputs!
 
+  # Every member of the workspace, when this item stands for them all under
+  # the wholeWorkspace setting, and otherwise none.
+  let members: [RustMember!]!
+
+  # Whether this item stands for every member: it then holds them. A member
+  # that a lane makes into a package of its own holds none.
+  let whole: Boolean! { members.length > 0 }
+
+  # Whether patterns leave this package out. A whole workspace is left out
+  # when they leave out every member.
+  let leftOut(patterns: [String!]!): Boolean! {
+    if (whole) {
+      members.any { member => rustSelects(patterns, member.path) } == false
+    } else {
+      rustSelects(patterns, path) == false
+    }
+  }
+
   """
   Whether the clippy setting leaves this package out.
   """
-  skipClippy: Boolean! { rustSelects(workspace.tool.clippy, path) == false }
+  skipClippy: Boolean! { leftOut(workspace.tool.clippy) }
 
   """
   Whether the test setting leaves this package out.
   """
-  skipTest: Boolean! { rustSelects(workspace.tool.test, path) == false }
+  skipTest: Boolean! { leftOut(workspace.tool.test) }
 
   """
   Format this package with rustfmt.
+
+  Under the wholeWorkspace setting, every package of the workspace.
   """
   fmt: Changeset! @generate {
     rustFmtLane(self)
@@ -125,6 +172,9 @@ type RustPackage {
 
   """
   Lint this package with clippy.
+
+  Under the wholeWorkspace setting, every package of the workspace that the
+  clippy setting selects, as one check.
   """
   clippy(selection: RustPackages!): Void @check {
     if (skipClippy == false) {
@@ -135,6 +185,10 @@ type RustPackage {
 
   """
   Run this package's tests.
+
+  Under the wholeWorkspace setting, those of every package of the workspace
+  that the test setting selects, in one run over a writable copy of the
+  whole repository.
   """
   test(selection: RustPackages!): Void @check {
     if (skipTest == false) {

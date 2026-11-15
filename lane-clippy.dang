@@ -1,5 +1,6 @@
 # The clippy lane: one `cargo clippy` over the selected packages, of which
-# each package's check reads its share. docs/lanes.md has the contract.
+# each package's check reads its share. Under the wholeWorkspace setting the
+# workspace's one check reads every share. docs/lanes.md has the contract.
 #
 # The command is
 #
@@ -277,9 +278,37 @@ let rustClippyReports(
   }
 }
 
+# What the shared step found in a whole workspace, for its one check: the
+# share of each covered package that has one, under the package's directory,
+# or "" when none has. The step and its command are those of the packages'
+# checks, so the verdict is theirs taken together: the check fails when any
+# of them would.
+let rustClippyWorkspace(selection: RustPackages!): String! {
+  let covered = selection.selected(selection.workspace.tool.clippy)
+  let ran = rustClippyRun(selection)
+  if (ran.exitCode == 0) { "" } else {
+    let reports = rustClippyReports(selection, covered, ran)
+    covered
+      .map { member, index => {{path: member.path, report: reports[index]!}} }
+      .filter { found => found.report != "" }
+      .map { found => found.path + ":\n" + found.report }
+      .join("\n")
+  }
+}
+
 # Fails when clippy reports an error in a package, or could not check it.
+# Under the wholeWorkspace setting the package is the whole workspace, and
+# the check fails for any package that the clippy setting selects.
 let rustClippyLane(package: RustPackage!, selection: RustPackages!): Void {
-  let covered = selection.selected(package.workspace.tool.clippy)
-  RustLaneResults(lane: "clippy", covered: covered, results: rustClippyStep(selection))
-    .assertPassed(package.path)
+  if (package.whole) {
+    let failure = rustClippyWorkspace(selection)
+    if (failure != "") {
+      raise "rust: clippy failed in " + package.path + ":\n" + failure
+    }
+    null
+  } else {
+    let covered = selection.selected(package.workspace.tool.clippy)
+    RustLaneResults(lane: "clippy", covered: covered, results: rustClippyStep(selection))
+      .assertPassed(package.path)
+  }
 }

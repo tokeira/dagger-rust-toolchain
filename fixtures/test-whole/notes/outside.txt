@@ -1,0 +1,1 @@
+A file of the repository, outside every member and outside the workspace.

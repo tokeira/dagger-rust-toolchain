@@ -100,6 +100,11 @@ type Rust {
   volumePrefix: String
 
   """
+  Whether a workspace's packages are one item, formatted, linted and tested together.
+  """
+  wholeWorkspace: Boolean!
+
+  """
   Packages to test. "!" excludes.
   """
   test: [String!]!
@@ -216,6 +221,13 @@ type Rust {
     """
     volumePrefix: String = null,
     """
+    Treat each workspace's packages as one item, keyed by the workspace
+    root: one fmt generator, one clippy check and one test check for the
+    workspace, in place of one for each package. Its tests run together,
+    over a writable copy of the whole repository.
+    """
+    wholeWorkspace: Boolean! = false,
+    """
     Packages to test, by workspace path, e.g. ["**", "!crates/slow"]. "!"
     excludes.
     """
@@ -277,6 +289,7 @@ type Rust {
       self.buildJobs = buildJobs
       self.cargoEnvironment = cargoEnvironment
       self.volumePrefix = volumePrefix
+      self.wholeWorkspace = wholeWorkspace
       self.test = test
       self.clippy = clippy
       self.clippyArgs = clippyArgs

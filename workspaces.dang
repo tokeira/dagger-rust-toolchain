@@ -150,6 +150,17 @@ type RustWorkspace {
     }
   }
 
+  # The repository as a whole-workspace test run sees it: every file at its
+  # path, without .git, the files that .gitignore ignores and this
+  # workspace's own target directory. Tests read files anywhere in it.
+  #
+  # .git is left out on purpose. A local workspace has it and one loaded from
+  # Git has not, and with it the run would be keyed on every commit and
+  # fetch. docs/lanes.md has what was measured.
+  let repositoryOf(ws: Workspace!): Directory! {
+    ws.directory("/", exclude: [".git", rustPathIn(path, "target")], gitignore: true)
+  }
+
   # The workspace's skeleton: its manifests, with an empty file in place of
   # each file that makes a Cargo target. Keyed on the manifests, Cargo.lock,
   # the Cargo configuration, the toolchain files and the set of target paths.
@@ -206,16 +217,21 @@ type RustWorkspace {
   """
   Member packages, keyed by directory.
 
-  Directories are relative to the repository root.
+  Directories are relative to the repository root. Under the wholeWorkspace
+  setting the collection has one item, keyed by the workspace root, which
+  stands for every member.
   """
   packages(ws: Workspace!): RustPackages! {
     let found = rustDiscover(tool, ws)
     let members = rustMembers(tool, found, path)
     RustPackages(
-      paths: members.map { member => member.path },
+      paths: if (tool.wholeWorkspace) { [path] } else {
+        members.map { member => member.path }
+      },
       members: members,
       workspace: self,
       inputs: inputs(ws, found),
+      repository: if (tool.wholeWorkspace) { repositoryOf(ws) } else { directory },
     )
   }
 
@@ -227,6 +243,17 @@ type RustWorkspace {
   """
   source(ws: Workspace!): Directory! {
     inputs(ws, rustDiscover(tool, ws)).source
+  }
+
+  """
+  The files a whole-workspace test run sees.
+
+  They are the repository's files at their paths, without .git, the files
+  that .gitignore ignores and this workspace's target directory. Under the
+  wholeWorkspace setting the tests run over a writable copy of them.
+  """
+  repository(ws: Workspace!): Directory! {
+    repositoryOf(ws)
   }
 
   """
@@ -348,7 +375,8 @@ type RustWorkspace {
   It is the container after the Cargo command of the lane "check", "clippy",
   "doc" or "test", run over every package that the lane's setting selects.
   The file /var/cache/rust/report says what the step did: the files its
-  source mirror wrote and removed, and the packages Cargo compiled.
+  source mirror wrote and removed, and the packages Cargo compiled. Under
+  the wholeWorkspace setting the test lane's step is the run of the tests.
 
   The report helps inspect a lane. Its format may change between releases,
   and no check's verdict depends on it.

@@ -106,6 +106,14 @@ type Dev {
   }
 
   """
+  Check the wholeWorkspace setting: a workspace's packages formatted, linted and tested as one.
+  """
+  wholeWorkspace(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "whole-workspace")
+    devPassed(run, devWhole(run))
+  }
+
+  """
   Check that the seven lanes of one workspace share one recipe and one fetch.
   """
   sharedLayers(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {

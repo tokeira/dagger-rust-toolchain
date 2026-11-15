@@ -1,0 +1,481 @@
+# The acceptance of the `wholeWorkspace` setting: a workspace's packages as
+# one item, with one fmt generator, one clippy check and one test check, and
+# its tests run together over a writable copy of the whole repository.
+#
+# The fixture is `test-whole`: a workspace of two members in the directory
+# `engine`, and a file of the repository outside it. The tests of one member
+# read a file of the other and the file outside, write into the repository,
+# run `git`, and build with `cargo` a project they write there. They pass
+# only where the run has all of that. `build-lints` and `lint-fmt` give the
+# clippy check and the generator something to report.
+
+# The fixture, its workspace's root, and the setting.
+let devWholeFixture: String! = "test-whole"
+
+let devWholeRoot: String! = "engine"
+
+let devWholeSetting: String! = "wholeWorkspace = true\n"
+
+# The members of the fixture: each one's directory and its name.
+let devWholeOther: {{directory: String!, name: String!}}! = {{
+  directory: "engine/crates/other",
+  name: "whole-other"
+}}
+
+let devWholeReader: {{directory: String!, name: String!}}! = {{
+  directory: "engine/crates/reader",
+  name: "whole-reader"
+}}
+
+# The tests of the member `engine/crates/reader`, as cargo-nextest names
+# them: those that read the repository, the one that builds a project in it,
+# and the one that the workspace's nextest configuration leaves out.
+let devWholeReadsMember: String! = "whole-reader::repository reads_a_file_of_another_member"
+
+let devWholeReadsOutside: String! = "whole-reader::repository reads_a_file_outside_every_member"
+
+let devWholeBuilds: String! = "whole-reader::repository builds_a_generated_project_with_cargo"
+
+let devWholeLeftOut: String! = "whole-reader::repository left_out_by_the_nextest_configuration"
+
+# How the lane's commands start, in a trace: `env` takes the target
+# directory out of their environment.
+let devWholeClear: String! = "env -u CARGO_TARGET_DIR -u CARGO_BUILD_BUILD_DIR "
+
+let devWholeRun: String! = devWholeClear + "cargo nextest run"
+
+let devWholeDoctests: String! = devWholeClear + "cargo test --doc"
+
+let devWholeCargoRun: String! = devWholeClear + "cargo test --no-fail-fast"
+
+# Every assertion about the wholeWorkspace setting. Each group is bound
+# before the lists are joined, as in devBuild.
+let devWhole(run: DevRun!): [String!]! {
+  let names = devWholeNames(run)
+  let tests = devWholeTests(run)
+  let volumes = devWholeVolumes(run)
+  let settings = devWholeSettings(run)
+  let clippy = devWholeClippy(run)
+  let fmt = devWholeFmt(run)
+  names + tests + volumes + settings + clippy + fmt
+}
+
+# The address of the test check of a package of the fixture's workspace,
+# without its scheme.
+let devWholeTest(package: String!): String! {
+  "test&rust-workspace=" + devWholeRoot + "&rust-package=" + package
+}
+
+# The verdicts of the test checks of packages of the fixture's workspace:
+# those of `failed` fail, and those of `passed` pass.
+let devWholeVerdicts(failed: [String!]!, passed: [String!]!): Map[String!]! {
+  let verdicts: Map[String!]! = [:]
+  failed.each { package => verdicts = verdicts.with(devWholeTest(package), "ERROR") }
+  passed.each { package => verdicts = verdicts.with(devWholeTest(package), "OK") }
+  verdicts
+}
+
+# The check names: one of each package check for each package by default,
+# and one for the workspace under the setting.
+let devWholeNames(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, devWholeFixture, "")
+  let members = [{{root: devWholeRoot, packages: [devWholeOther.directory, devWholeReader.directory]}}]
+  devListed(workspace, run, [], devLinks(members))
+  passed += [
+    devHeld(
+      "test-whole: by default the workspace engine has the clippy, stale and test checks of "
+        + "engine/crates/other and of engine/crates/reader, beside its own four",
+    ),
+  ]
+
+  let whole = devConfigured(workspace, run, devWholeFixture, devWholeSetting)
+  let one = [{{root: devWholeRoot, packages: [devWholeRoot]}}]
+  devListed(whole, run, [], devLinks(one))
+  devSameLines(
+    "dagger generate -l --all -f=link under wholeWorkspace",
+    devStdout(whole, run, ["generate", "-l", "--all", "-f=link", "-s"]),
+    ["dag+generator://?generator=fmt&rust-workspace=engine&rust-package=engine"],
+  )
+  passed += [
+    devHeld(
+      "test-whole: under wholeWorkspace = true the workspace has one clippy check, one stale "
+        + "check and one test check, at the package engine, its root, and one fmt generator, "
+        + "beside its own four: no check is named for a member",
+    ),
+  ]
+  passed
+}
+
+# The tests: what a package's own run lacks, what the whole run has, the
+# commands it runs, and what it reads.
+let devWholeTests(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let checks = ["check", "--check=test"]
+  # A file of this run, outside the workspace: only a run that is keyed on
+  # the repository is new for it.
+  let fresh = "/" + devWholeFixture + "/notes/acceptance-run.txt"
+  let workspace = devConsumer(run, devWholeFixture, "")
+
+  let apart = devCacheFailing(workspace, run, checks)
+  let apartCheck = "the tests of test-whole, a package at a time"
+  devCacheSameVerdicts(
+    apartCheck,
+    apart,
+    devWholeVerdicts([devWholeReader.directory], [devWholeOther.directory]),
+  )
+  devEach([devWholeReadsMember, devWholeReadsOutside, devWholeBuilds]) { test =>
+    devTestReported(apartCheck, apart, "FAIL", test)
+  }
+  passed += [
+    devHeld(
+      "test-whole: a package at a time, the test check of engine/crates/reader fails: its "
+        + "run sees neither the file of engine/crates/other nor the file outside the "
+        + "workspace, and the project its test builds lands in the lane's target directory, "
+        + "not in its own",
+    ),
+  ]
+
+  let whole = devConfigured(workspace, run, devWholeFixture, devWholeSetting)
+    .withNewFile(fresh, run.next)
+  let steps = devSteps(whole, run, checks)
+  let wholeCheck = "the tests of test-whole under wholeWorkspace"
+  devStateOf(wholeCheck, steps, devWholeRun, "DONE")
+  devStateOf(wholeCheck, steps, devWholeDoctests, "DONE")
+  let ran = devBuildOnly(wholeCheck, steps, devWholeRun)
+  if (ran.contains(" --workspace ") == false
+    or ran.contains(" --target-dir " + devTestTarget + " ") == false
+    or steps.any { step => step.command.hasPrefix(devWholeRun) and step.helper == false }
+    or steps.any { step => step.command.contains("nextest list") }
+    or steps.any { step => step.command.hasPrefix("sh ") or step.command.hasPrefix("bash ") }) {
+    raise devCheckFailed(
+      wholeCheck,
+      "did not run one `" + devWholeRun + " ... --workspace` under the helper, with its target "
+        + "directory as an argument, and no separate test build or shell:\n" + devDescribed(steps),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-whole: under wholeWorkspace = true the workspace's one test check passes: a test "
+        + "of engine/crates/reader reads a file of engine/crates/other and a file outside the "
+        + "workspace, writes into the repository, runs git, and builds with cargo a project it "
+        + "writes there, whose binary lands in the project's own target directory; one `"
+        + devWholeRun + " --workspace` builds and runs every test under the helper, then one `"
+        + devWholeDoctests + "` runs the doctests, and no step builds the tests apart",
+    ),
+  ]
+
+  let second = devSteps(whole, run, checks)
+  if (second.any { step => step.state != "CACHED" }) {
+    raise devCheckFailed(
+      "a second run of the tests of test-whole under wholeWorkspace",
+      "ran a command again:\n" + devDescribed(second),
+    )
+  }
+  let noted = whole.withNewFile(fresh, run.next)
+  devStateOf(
+    "the tests of test-whole after an edit to a file outside the workspace",
+    devSteps(noted, run, checks),
+    devWholeRun,
+    "DONE",
+  )
+  passed += [
+    devHeld(
+      "test-whole: a second run over an unchanged repository runs no command, and an edit to "
+        + "a file outside the workspace runs the tests again: the run is keyed on the "
+        + "repository",
+    ),
+  ]
+
+  let elsewhere = whole.withNewFile(
+    "/" + devWholeFixture + "/notes/outside.txt",
+    "Another text, of " + run.next + ".\n",
+  )
+  let misread = devCacheFailing(elsewhere, run, checks)
+  let misreadCheck = "the tests of test-whole with another text in the file outside the workspace"
+  devCacheSameVerdicts(misreadCheck, misread, devWholeVerdicts([devWholeRoot], []))
+  devSays(misreadCheck, misread, "rust: test failed in engine:")
+  devTestReported(misreadCheck, misread, "FAIL", devWholeReadsOutside)
+  devTestReported(misreadCheck, misread, "PASS", devWholeReadsMember)
+  devTestReported(misreadCheck, misread, "PASS", devWholeBuilds)
+  passed += [
+    devHeld(
+      "test-whole: with another text in the file outside the workspace, the workspace's test "
+        + "check fails with \"rust: test failed in engine:\" and cargo-nextest's report, which "
+        + "has the test that reads the file failed and the others passed",
+    ),
+  ]
+
+  let unconfigured = whole.withoutFile("/" + devWholeFixture + "/engine/.config/nextest.toml")
+  let unfiltered = devCacheFailing(unconfigured, run, checks)
+  devTestReported(
+    "the tests of test-whole without its .config/nextest.toml",
+    unfiltered,
+    "FAIL",
+    devWholeLeftOut,
+  )
+  passed += [
+    devHeld(
+      "test-whole: the run honours the workspace's .config/nextest.toml: the test that the "
+        + "file leaves out runs, and fails, only once the file is gone",
+    ),
+  ]
+  passed
+}
+
+# The volumes of the whole run, and the copy of the repository it runs over.
+let devWholeVolumes(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let key = "whole-" + run.next
+  let workspace = devConsumer(
+    run,
+    devWholeFixture,
+    devWholeSetting + "volumePrefix = \"" + key + "\"\n",
+  )
+
+  let listed = devLines(
+    devStdout(
+      workspace,
+      run,
+      devWorkspaceCall(devWholeRoot, ["repository", "glob", "--pattern", "**"]),
+    ),
+  )
+  let wanted = [
+    "dagger.toml",
+    "engine/.config/nextest.toml",
+    "engine/Cargo.lock",
+    "engine/crates/other/data/word.txt",
+    "engine/crates/reader/tests/repository.rs",
+    "notes/outside.txt",
+  ]
+  if (wanted.any { file => listed.contains(file) == false }
+    or listed.any { file => file == ".git/" or file.hasPrefix(".git/") }) {
+    raise devCheckFailed(
+      "the repository of test-whole, as its whole run sees it",
+      "holds\n" + listed.join("\n") + "\nwhich must have " + devQuotedList(wanted)
+        + " and nothing of .git",
+    )
+  }
+  passed += [
+    devHeld(
+      "test-whole: the repository as the whole run sees it holds the workspace's files, "
+        + "those of both members and its .config/nextest.toml, and the files outside the "
+        + "workspace, dagger.toml too, and nothing of the .git directory that the repository "
+        + "has",
+    ),
+  ]
+
+  let first = devCacheInspected(workspace, run, devWholeRoot, "test")
+  let check = "the whole run of test-whole over empty volumes"
+  devCacheMounted(
+    check,
+    first.trace,
+    [
+      devCacheLocked(key + "-engine-source-test", "/src/" + devWholeFixture, false),
+      devCacheLocked(key + "-engine-target-test", devTestTarget, true),
+    ],
+  )
+  devCacheUnderHelper(check, devExecs(first.trace), devWholeRun)
+  if (first.report.kept != 0
+    or first.report.wrote.contains("notes/outside.txt") == false
+    or first.report.wrote.contains("engine/crates/other/data/word.txt") == false
+    or first.report.compiled != [devWholeOther.name, devWholeReader.name]) {
+    raise devCheckFailed(
+      check,
+      "did not write the repository to an empty mirror and compile both members:\n"
+        + devTail(first.report.text),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-whole: the whole run mounts the test lane's two volumes, both LOCKED: " + key
+        + "-engine-source-test at the mount path, the repository's root, and " + key
+        + "-engine-target-test at the target directory, started from the dependency layer; "
+        + "over empty volumes it writes the whole repository to its mirror, the file outside "
+        + "the workspace too, and compiles both members",
+    ),
+  ]
+  passed
+}
+
+# The `test` and `testRunner` settings under wholeWorkspace.
+let devWholeSettings(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let checks = ["check", "--check=test"]
+  # The file outside the workspace, with a text that fails the test of
+  # engine/crates/reader that reads it.
+  let broken = devConsumer(run, devWholeFixture, "").withNewFile(
+    "/" + devWholeFixture + "/notes/outside.txt",
+    "Another text, of " + run.next + ".\n",
+  )
+
+  let narrowed = devConfigured(
+    broken,
+    run,
+    devWholeFixture,
+    devWholeSetting + "test = [\"engine/crates/other\"]\n",
+  )
+  let narrowedCheck = "the tests of test-whole under wholeWorkspace and test = "
+    + "[\"engine/crates/other\"]"
+  let only = devBuildOnly(narrowedCheck, devSteps(narrowed, run, checks), devWholeRun)
+  if (only.contains(" -p whole-other ") == false
+    or only.contains("whole-reader")
+    or only.contains("--workspace")) {
+    raise devCheckFailed(narrowedCheck, "ran `" + only + "`, not engine/crates/other alone")
+  }
+  let none = devConfigured(broken, run, devWholeFixture, devWholeSetting + "test = [\"!**\"]\n")
+  let idle = devSteps(none, run, checks)
+  if (idle.any { step =>
+    step.command.contains("cargo nextest") or step.command.contains("cargo test")
+  }) {
+    raise devCheckFailed(
+      "the tests of test-whole under wholeWorkspace and test = [\"!**\"]",
+      "reached the test lane:\n" + devDescribed(idle),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-whole: under wholeWorkspace the test setting still chooses the packages: with "
+        + "test = [\"engine/crates/other\"] the run names that package with -p and passes, "
+        + "although a test of engine/crates/reader would fail; with every package left out the "
+        + "check passes without running",
+    ),
+  ]
+
+  let plain = devConfigured(
+    devConsumer(run, devWholeFixture, "").withNewFile(
+      "/" + devWholeFixture + "/notes/acceptance-run.txt",
+      run.next,
+    ),
+    run,
+    devWholeFixture,
+    devWholeSetting + "testRunner = \"cargo\"\n",
+  )
+  let cargoSteps = devSteps(plain, run, checks)
+  let cargoCheck = "the tests of test-whole under wholeWorkspace and testRunner = \"cargo\""
+  devStateOf(cargoCheck, cargoSteps, devWholeCargoRun, "DONE")
+  if (cargoSteps.any { step =>
+    step.command.contains("nextest") or step.command.hasPrefix(devWholeDoctests)
+  }) {
+    raise devCheckFailed(
+      cargoCheck,
+      "ran cargo-nextest, or the doctests apart:\n" + devDescribed(cargoSteps),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-whole: under wholeWorkspace and testRunner = \"cargo\" one `" + devWholeCargoRun
+        + " ... --workspace` runs the tests and the doctests, without cargo-nextest and "
+        + "without a doctest step of its own, and the check passes",
+    ),
+  ]
+  passed
+}
+
+# The clippy check of a whole workspace, over the workspace whose members
+# differ in what clippy says of them.
+let devWholeClippy(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let checks = ["check", "--check=clippy"]
+  let workspace = devConsumer(run, "build-lints", devWholeSetting)
+
+  let output = devCacheFailing(workspace, run, checks)
+  let check = "dagger check --check=clippy over build-lints under wholeWorkspace"
+  devCacheSameVerdicts(check, output, devCacheLintVerdicts(["."], []))
+  devEach([
+    "rust: clippy failed in .:",
+    "faulty:",
+    "equal expressions as operands to `==`",
+    "blocked:",
+    "not checked: blocked by lints-faulty",
+  ]) { said =>
+    devSays(check, output, said)
+  }
+  devSilent(check, output, "clean:")
+  devSilent(check, output, "untidy:")
+  let command = devBuildOnly(check, devBuildTracedAny(workspace, run, checks), "cargo clippy")
+  let expected = "cargo clippy --quiet --workspace --all-targets --keep-going "
+    + "--message-format=json --locked -- --no-deps"
+  if (command.hasPrefix(expected) == false) {
+    raise devCheckFailed(check, "ran `" + command + "`, not `" + expected + "`")
+  }
+  passed += [
+    devHeld(
+      "build-lints: under wholeWorkspace = true the workspace has one clippy check, which "
+        + "fails with \"rust: clippy failed in .:\" and, under each package's directory, what "
+        + "the packages' own checks say: clippy's error in faulty, and \"not checked: blocked "
+        + "by lints-faulty\" in blocked; it names neither clean nor untidy; the command is `"
+        + expected + "`, the one the packages' checks share",
+    ),
+  ]
+
+  let without = devConfigured(
+    workspace.withNewFile("/build-lints/clean/src/unseen.rs", "// " + run.next + "\n"),
+    run,
+    "build-lints",
+    devWholeSetting + "clippy = [\"**\", \"!faulty\"]\n",
+  )
+  let named = devBuildOnly(
+    "dagger check --check=clippy under wholeWorkspace and clippy",
+    devTraced(without, run, checks),
+    "cargo clippy",
+  )
+  if (named.contains(" -p lints-blocked -p lints-clean -p lints-untidy --all-targets ") == false) {
+    raise devCheckFailed(
+      "dagger check --check=clippy under wholeWorkspace and clippy = [\"**\", \"!faulty\"]",
+      "ran `" + named + "`, which must name blocked, clean and untidy",
+    )
+  }
+  passed += [
+    devHeld(
+      "build-lints: under wholeWorkspace the clippy setting still chooses the packages: with "
+        + "clippy = [\"**\", \"!faulty\"] the command names the other three with -p, and the "
+        + "check passes",
+    ),
+  ]
+  passed
+}
+
+# The fmt generator of a whole workspace, over the workspace with packages
+# that rustfmt changes. Its root is `crates`, below the repository root.
+let devWholeFmt(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "lint-fmt", devWholeSetting)
+  let stale = ["check", "--check=stale"]
+  devListed(
+    workspace,
+    run,
+    ["--check=stale"],
+    ["dag+check://?check=stale&rust-workspace=crates&rust-package=crates"],
+  )
+  devRefused(workspace, run, stale, devLintStale)
+
+  # The summary of the changes is the command's diagnostic output.
+  let summary = devPlain(devStderr(workspace, run, ["generate", "--no-apply", "-s"]))
+  let changed = devSorted(
+    devLines(summary).map { line => devWords(line).takeFirst(1).join("") }.filter { word =>
+      word.hasSuffix(".rs")
+    },
+  )
+  let expected = [
+    "crates/messy/inner/src/lib.rs",
+    "crates/messy/src/extra.rs",
+    "crates/messy/src/lib.rs",
+  ]
+  if (changed != expected) {
+    raise devCheckFailed(
+      "dagger generate --no-apply under wholeWorkspace",
+      "would change " + devQuotedList(changed) + ", not " + devQuotedList(expected) + ":\n"
+        + summary,
+    )
+  }
+  let applied = devDagger(workspace, run, ["generate", "-y", "-s"])
+  devStdout(applied, run, stale)
+  [
+    devHeld(
+      "lint-fmt: under wholeWorkspace = true the workspace crates has one stale check, at the "
+        + "package crates, which fails with \"" + devLintStale + "\"; its one generator would "
+        + "change the three files that the packages' generators change between them, and once "
+        + "dagger generate has written them the stale check passes",
+    ),
+  ]
+}
