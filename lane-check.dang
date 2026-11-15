@@ -1,0 +1,64 @@
+# The check lane: `cargo check --workspace` for the feature sets clippy does
+# not cover. docs/lanes.md has the contract.
+#
+# clippy compiles every target under the settings' features, and reports
+# what `cargo check` would. This lane adds the two ends of the feature
+# space, where a missing `cfg` or a feature that does not stand alone shows:
+#
+#   --no-default-features   no feature at all
+#   --all-features          every feature at once
+#
+# each for the libraries and binaries of every member. An end is left out
+# when the settings already put clippy there.
+
+# The feature sets the lane checks, as Cargo's flags.
+let rustCheckSets(tool: Rust!): [[String!]!]! {
+  let none: [[String!]!]! = []
+  let bare = tool.noDefaultFeatures and tool.features.length == 0 and tool.allFeatures == false
+  (if (bare) { none } else { [["--no-default-features"]] })
+    + (if (tool.allFeatures) { none } else { [["--all-features"]] })
+}
+
+# The lane's commands, one for each feature set, in the lane's container:
+# the last step, and what to tell the user of each set that failed.
+#
+# Every set runs in the lane's own volumes. Cargo keeps what it compiled
+# under one set apart from the others, so a set compiles again only what an
+# edit changed, and what the features change. Each step syncs the mirror
+# and runs Cargo itself, so each is right whatever ran before it.
+let rustCheckRun(workspace: RustWorkspace!, inputs: RustInputs!): {{step: Container!, failures: [String!]!}}! {
+  let sets = rustCheckSets(workspace.tool)
+  let failures: [String!]! = []
+  let step = sets.reduce(
+    rustDependenciesLane(
+      workspace,
+      inputs,
+      "check",
+      [],
+      rustDependenciesLayer(workspace, inputs, sets),
+      "",
+    ),
+  ) { lane, set =>
+    let ran = rustCompileCargo(
+      workspace,
+      lane,
+      ["cargo", "check", "--quiet", "--workspace"] + rustDependenciesFlags(workspace.tool) + set,
+      "/tmp/rust-check-output",
+      [],
+    )
+    if (ran.exitCode != 0) {
+      failures += ["cargo check " + set.join(" ") + " failed in " + workspace.path + ":\n" + ran.stderr]
+    }
+    ran
+  }
+  {{step, failures}}
+}
+
+# Fails when the workspace does not type-check.
+let rustCheckLane(workspace: RustWorkspace!, inputs: RustInputs!): Void {
+  let failures = rustCheckRun(workspace, inputs).failures
+  if (failures.length > 0) {
+    raise "rust: " + failures.join("\n")
+  }
+  null
+}

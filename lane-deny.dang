@@ -1,0 +1,107 @@
+# The deny lane: `cargo deny check`, when the workspace has a deny.toml.
+# docs/lanes.md has the contract.
+#
+# The step's inputs are all content: the toolchain layer, the fetch layer's
+# crates, the cargo-deny binary, the advisory database at one commit, and the
+# workspace without the contents of its Rust files. It runs again when one of
+# them changes, which for the database is whenever RustSec publishes.
+
+# The release of cargo-deny that the lane runs.
+let rustDenyVersion: String! = "0.19.9"
+
+# The advisory database cargo-deny reads unless deny.toml names another.
+let rustDenyDatabaseAddress: String! = "https://github.com/RustSec/advisory-db"
+
+# Where cargo-deny keeps that database, below Cargo's home: a directory
+# named for the address and a hash of it.
+let rustDenyDatabasePath: String! = "advisory-dbs/advisory-db-3157b0e258782691"
+
+# The cargo-deny binary for a platform, from the project's release archive.
+# The engine checks the archive against the digest before it unpacks it. The
+# binary is linked statically, so it runs in any image.
+let rustDenyBinary(platform: String!): File! {
+  let triple = if (platform == "linux/amd64") {
+    "x86_64-unknown-linux-musl"
+  } else if (platform == "linux/arm64") {
+    "aarch64-unknown-linux-musl"
+  } else {
+    raise "rust: no pinned cargo-deny for " + platform
+  }
+  let digest = if (platform == "linux/amd64") {
+    "f1f8eedc2a3ac297c540873f93785d4104b102c0079506b2a6b3221b7ec956af"
+  } else {
+    "32580dcc2bc13fbeeb7c50edc38ef99c3b9ce9569a1d07a96e11b3b941f3e72e"
+  }
+  http(
+    "https://github.com/EmbarkStudios/cargo-deny/releases/download/" + rustDenyVersion
+      + "/cargo-deny-" + rustDenyVersion + "-" + triple + ".tar.gz",
+    checksum: "sha256:" + digest,
+  ).extract(stripComponents: 1).file("cargo-deny")
+}
+
+# The advisory database at the commit its default branch is at now, with its
+# .git directory, which cargo-deny opens. The engine resolves the branch on
+# every run and never pins it in the repository's dagger.lock: a check for
+# new advisories must see them.
+let rustDenyDatabase: Directory! {
+  git(rustDenyDatabaseAddress).head(noLock: true).tree
+}
+
+# What cargo-deny reads of the workspace: the skeleton, and every file that
+# is not Rust source, such as deny.toml and the licence files. Cargo needs
+# the target files to exist and cargo-deny does not read them, so an edit to
+# a Rust file leaves the step cached.
+#
+# With locked off the lockfile is the one the fetch layer resolved, so that
+# cargo-deny checks the crates that were downloaded.
+let rustDenyTree(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
+  let files = workspace
+    .skeletonOf(inputs)
+    .withDirectory("/", inputs.source.filter(exclude: ["**/*.rs"]))
+  if (workspace.tool.locked) { files } else {
+    files.withFile(
+      rustPathIn(workspace.path, "Cargo.lock"),
+      workspace.fetchedOf(inputs).file(rustPathIn(workspace.workdir, "Cargo.lock")),
+    )
+  }
+}
+
+# The flags cargo-deny takes from the settings, before its subcommand. The
+# feature and target settings choose the dependency graph it checks, over
+# what deny.toml says of them.
+let rustDenyFlags(tool: Rust!): [String!]! {
+  let none: [String!]! = []
+  (if (tool.locked) { ["--locked"] } else { none })
+    + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
+    + (if (tool.features.length == 0) { none } else { ["--features", tool.features.join(",")] })
+    + (if (tool.allFeatures) { ["--all-features"] } else { none })
+    + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
+}
+
+# `cargo deny check` in the workspace root, off the network: the crates come
+# from the fetch layer and the advisory database from the engine.
+let rustDenyStep(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+  let tool = workspace.tool
+  let home = rustCargoHome(tool)
+  let platform = rustImage(tool).platform
+  workspace
+    .withCrates(inputs, workspace.toolchainOf(inputs, []))
+    .withFile(home + "/bin/cargo-deny", rustDenyBinary(`${platform}`))
+    .withMountedDirectory(home + "/" + rustDenyDatabasePath, rustDenyDatabase)
+    .withMountedDirectory(workspace.mountPath, rustDenyTree(workspace, inputs))
+    .withExec(
+      ["cargo", "deny"] + rustDenyFlags(tool) + ["check", "--disable-fetch"],
+      expect: ANY,
+    )
+}
+
+# Fails when cargo-deny rejects the workspace's dependencies.
+let rustDenyLane(workspace: RustWorkspace!, inputs: RustInputs!): Void {
+  if (inputs.source.exists(rustPathIn(workspace.path, "deny.toml"))) {
+    let ran = rustDenyStep(workspace, inputs)
+    if (ran.exitCode != 0) {
+      raise "rust: cargo deny check failed in " + workspace.path + ":\n" + ran.stderr + ran.stdout
+    }
+  }
+  null
+}

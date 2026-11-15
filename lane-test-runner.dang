@@ -1,0 +1,39 @@
+# The test lane's runner: cargo-nextest, pinned by version and by the checksum
+# of its release archive for linux/amd64 and linux/arm64.
+#
+# The engine fetches the archive, verifies its checksum and unpacks it, so
+# installing the runner executes nothing. The binary is mounted, not copied,
+# and is the statically linked build: it runs in the default image and in any
+# base that replaces it.
+
+let rustTestNextestVersion: String! = "0.9.151"
+
+# The release archive for a platform. The checksums are those of the
+# release's own .sha256 files.
+let rustTestNextestArchive(platform: String!): File! {
+  let release = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-"
+    + rustTestNextestVersion + "/cargo-nextest-" + rustTestNextestVersion + "-"
+  if (platform == "linux/amd64") {
+    http(
+      release + "x86_64-unknown-linux-musl.tar.gz",
+      checksum: "sha256:6b284d6fde9670dfb6ee10ea9d9abbc85f95643d3f592472d420d82e257b3a6c",
+    )
+  } else if (platform == "linux/arm64") {
+    http(
+      release + "aarch64-unknown-linux-musl.tar.gz",
+      checksum: "sha256:a9ee2d53cf0711d879f068c0ff814b6fe3af3f9be8799f8ab484e47571087160",
+    )
+  } else {
+    raise "rust: no cargo-nextest is pinned for " + platform
+  }
+}
+
+# A container with cargo-nextest among Cargo's own binaries, where Cargo
+# finds its subcommands. The binary is the one for the container's platform.
+let rustTestWithNextest(tool: Rust!, ctr: Container!): Container! {
+  let platform = `${ctr.platform}`.split("/").takeFirst(2).join("/")
+  ctr.withMountedFile(
+    rustCargoHome(tool) + "/bin/cargo-nextest",
+    rustTestNextestArchive(platform).extract.file("cargo-nextest"),
+  )
+}

@@ -1,0 +1,91 @@
+# The fmt lane: `cargo fmt -p <package>` under the fmt toolchain layer, one
+# step per package. docs/lanes.md has the contract.
+#
+# A package's step runs over the workspace's skeleton and the package's own
+# Rust files, so an edit to another package leaves it cached. `cargo fmt`
+# asks `cargo metadata --no-deps` for the package's targets, which needs every
+# member's manifest and target paths and nothing else: no crate, no lockfile
+# and no network.
+
+# The names rustfmt gives its configuration file.
+let rustFmtConfigNames: [String!]! = ["rustfmt.toml", ".rustfmt.toml"]
+
+# The paths a rustfmt configuration file can have in some directories.
+let rustFmtConfigPaths(dirs: [String!]!): [String!]! {
+  let none: [String!]! = []
+  dirs.reduce(none) { files, dir =>
+    files + rustFmtConfigNames.map { name => rustPathIn(dir, name) }
+  }
+}
+
+# The rustfmt configuration files of the directories above a workspace root.
+# rustfmt takes the configuration nearest to the file it formats, and looks
+# for it up to the repository root, beyond the workspace's own files.
+let rustFmtConfigsAbove(ws: Workspace!, root: String!): Directory! {
+  let above = rustLineage(root).filter { dir => dir != root }
+  # No patterns would include every file, so the repository root has an
+  # empty directory.
+  if (above.length == 0) { directory } else {
+    ws.directory("/", include: rustFmtConfigPaths(above))
+  }
+}
+
+# The packages below a package's directory: the directories there that hold
+# a Cargo.toml. Their files are not the package's, as Cargo has it.
+let rustFmtNested(package: RustPackage!): [String!]! {
+  package
+    .inputs
+    .manifests
+    .glob(rustPathIn(package.path, "**/Cargo.toml"))
+    .filter { file => file.hasSuffix("/") == false }
+    .map { file => rustParent(file) }
+    .filter { dir => dir != package.path }
+}
+
+# The Rust files of a package in a tree of the repository, at their
+# repository paths: what rustfmt may rewrite. The workspace's target
+# directory is left out, as it is from the workspace's source.
+let rustFmtRustFiles(package: RustPackage!, tree: Directory!): Directory! {
+  tree.filter(
+    include: rustScoped(package.path, ["**/*.rs"]),
+    exclude: rustFmtNested(package) + [rustPathIn(package.workspace.path, "target")],
+  )
+}
+
+# What rustfmt reads to format a package: the package's Rust files, and the
+# rustfmt configuration files in the package and in each directory above it.
+let rustFmtFiles(package: RustPackage!): Directory! {
+  let above = rustLineage(package.path).filter { dir => dir != package.path }
+  package.inputs.formatFiles.withDirectory(
+    "/",
+    package.inputs.source.filter(
+      include: rustScoped(package.path, ["**/*.rs", "**/rustfmt.toml", "**/.rustfmt.toml"])
+        + rustFmtConfigPaths(above),
+      exclude: rustFmtNested(package),
+    ),
+  )
+}
+
+# `cargo fmt -p <package>` over the skeleton and the package's files. The
+# step is keyed on the fmt toolchain layer, the manifests, the set of target
+# paths, and the package's Rust files and rustfmt configuration.
+let rustFmtStep(package: RustPackage!): Container! {
+  let workspace = package.workspace
+  workspace
+    .fmtToolchainOf(package.inputs)
+    .withMountedDirectory(
+      workspace.mountPath,
+      workspace.skeletonOf(package.inputs).withDirectory("/", rustFmtFiles(package)),
+    )
+    .withExec(["cargo", "fmt", "-p", package.name], expect: ANY)
+}
+
+# The changes rustfmt makes to a package's files.
+let rustFmtLane(package: RustPackage!): Changeset! {
+  let ran = rustFmtStep(package)
+  if (ran.exitCode != 0) {
+    raise "rust: cargo fmt failed in " + package.path + ":\n" + ran.stderr
+  }
+  rustFmtRustFiles(package, ran.directory(package.workspace.mountPath))
+    .changes(rustFmtRustFiles(package, package.inputs.source))
+}

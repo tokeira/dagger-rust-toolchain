@@ -1,0 +1,736 @@
+# The acceptance of the test lane: the runner, the dependency layer's test
+# flavour, the shared test build, and each package's own run and doctests.
+#
+# A check whose inputs the engine has seen answers from the cache without
+# running, so the assertions about what a run does first make the run new: a
+# file that holds a value of this run is part of each package's own files.
+#
+# What a step printed reaches a trace as log lines, which a session that ends
+# at once can lose. The assertions therefore read only what is part of a
+# result: whether a command succeeds, the message of a check that fails, and
+# the state of each step.
+
+# The fixture the lane's assertions run over, and its packages: each one's
+# directory and its name.
+let devTestSuite: String! = "test-suite"
+
+let devTestBase: {{directory: String!, name: String!}}! = {{
+  directory: "crates/base",
+  name: "suite-base"
+}}
+
+let devTestLone: {{directory: String!, name: String!}}! = {{
+  directory: "crates/lone",
+  name: "suite-lone"
+}}
+
+let devTestMid: {{directory: String!, name: String!}}! = {{
+  directory: "crates/mid",
+  name: "suite-mid"
+}}
+
+let devTestTool: {{directory: String!, name: String!}}! = {{
+  directory: "crates/tool",
+  name: "suite-tool"
+}}
+
+let devTestPackages: [{{directory: String!, name: String!}}!]! = [
+  devTestBase,
+  devTestLone,
+  devTestMid,
+  devTestTool,
+]
+
+# The arguments of `dagger` that run the test checks.
+let devTestChecks: [String!]! = ["check", "--check=test"]
+
+# The steps that write the recipe and fetch the crates, which the lane shares
+# with every other, each by the start of its command.
+let devTestPrepare: String! = "cargo chef prepare"
+
+let devTestRecipe: [String!]! = ["cargo-chef chef cook --no-build", "cargo fetch"]
+
+# The commands of the dependency layer, of the shared build under each runner,
+# and of the shared doctest step, as a trace starts them.
+let devTestDependencies: [String!]! = ["cargo build --tests --workspace", "cargo clean"]
+
+let devTestBuild: String! = "cargo nextest list --list-type binaries-only"
+
+let devTestCargoBuild: String! = "cargo test --no-run"
+
+let devTestDoctests: String! = "cargo test --doc"
+
+# Where the lane's Cargo commands build.
+let devTestTarget: String! = "/var/cache/rust/target-test"
+
+# The file that pins the runner, and where its releases are.
+let devTestRunnerFile: String! = "lane-test-runner.dang"
+
+let devTestReleases: String! = "https://github.com/nextest-rs/nextest/releases/download"
+
+# The test lane: its runner's pins, then the lane over the fixtures. Each
+# group is bound before the lists are joined, as in devBuild.
+let devTest(run: DevRun!): [String!]! {
+  let runner = devTestRunner(run)
+  let single = devTestSingle(run)
+  let alone = devTestAlone(run)
+  let stubs = devTestStubs(run)
+  let suite = devTestOverSuite(run)
+  runner + single + alone + stubs + suite
+}
+
+# The runner's pins. A run of the lane fetches the archive of the engine's
+# platform alone, so this fetches the archive of each platform with the
+# checksum the lane pins: the engine refuses a file whose checksum differs.
+let devTestRunner(run: DevRun!): [String!]! {
+  let pins = run.source.file(devTestRunnerFile).contents
+  let versions = devTestQuoted(pins, "let rustTestNextestVersion: String! = \"")
+  let archives = devTestQuoted(pins, "release + \"")
+  let checksums = devTestQuoted(pins, "checksum: \"")
+  if (versions.length != 1) {
+    raise devCheckFailed(devTestRunnerFile, "does not pin one version")
+  }
+  let version = versions[0]!
+  let platforms = ["x86_64-unknown-linux-", "aarch64-unknown-linux-"]
+  if (archives.length != platforms.length
+    or checksums.length != platforms.length
+    or archives.map { archive, index => archive.hasPrefix(platforms[index]!) }.contains(false)) {
+    raise devCheckFailed(
+      devTestRunnerFile,
+      "pins the archives " + devQuotedList(archives) + " with " + devQuotedList(checksums)
+        + ", not one for linux/amd64 and one for linux/arm64",
+    )
+  }
+  let pinned = archives.map { archive, index =>
+    {{archive, checksum: checksums[index]!}}
+  }
+  devEach(pinned) { pin =>
+    let fetched = http(
+      devTestReleases + "/cargo-nextest-" + version + "/cargo-nextest-" + version + "-" + pin.archive,
+      checksum: pin.checksum,
+    )
+    if (fetched.size == 0) {
+      raise devCheckFailed(devTestRunnerFile, "fetched an empty " + pin.archive)
+    }
+  }
+  [
+    devHeld(
+      "test lane: the release archives of cargo-nextest " + version + " for linux/amd64 and "
+        + "linux/arm64 have the checksums the lane pins",
+    ),
+  ]
+}
+
+# What follows `after` on each line of `pins` that has it, up to the next
+# quote.
+let devTestQuoted(pins: String!, after: String!): [String!]! {
+  devLines(pins).filter { line => line.contains(after) }.map { line =>
+    line.split(after, limit: 2).dropFirst(1).join("").split("\"").takeFirst(1).join("")
+  }
+}
+
+# The single-package fixture: a package at the repository root, with a unit
+# test and an integration test.
+let devTestSingle(run: DevRun!): [String!]! {
+  let root = {{directory: ".", name: "single"}}
+  let workspace = devConsumer(run, "single", "")
+    .withNewFile("/single/acceptance-run.txt", run.next)
+  devTestRunState(
+    "the tests of the single fixture",
+    devSteps(workspace, run, devTestChecks),
+    root,
+    "DONE",
+  )
+
+  let failing = workspace.withExec(
+    ["sed", "-i", "s/add(1, 2), 3/add(1, 2), 4/", "/single/tests/smoke.rs"],
+  )
+  let output = devTestFailure(failing, run, devTestChecks)
+  let check = "the tests of the single fixture with a failing integration test"
+  devTestVerdicts(check, output, [root], [])
+  devSays(check, output, "rust: test failed in .:")
+  devTestReported(check, output, "PASS", "single tests::adds")
+  devTestReported(check, output, "FAIL", "single::smoke adds_from_outside")
+  [
+    devHeld(
+      "single: the test check of the package at the repository root passes, and with a "
+        + "failing integration test cargo-nextest's report has the unit test passed and the "
+        + "integration test failed",
+    ),
+  ]
+}
+
+# The fixture with one package whose doctest fails. Its workspace has a single
+# member, so the shared doctest step runs with `--workspace` and Cargo's hint
+# names no package: the check must fail all the same.
+let devTestAlone(run: DevRun!): [String!]! {
+  let root = {{directory: ".", name: "doctest-alone"}}
+  let workspace = devConsumer(run, "test-doctest", "")
+    .withNewFile("/test-doctest/acceptance-run.txt", run.next)
+  let output = devTestFailure(workspace, run, devTestChecks)
+  let check = "the tests of a single package with a failing doctest"
+  devTestVerdicts(check, output, [root], [])
+  devSays(check, output, "rust: test failed in .:")
+  devSays(check, output, "Doc-tests doctest_alone")
+  devSays(check, output, "src/lib.rs - halve (line 7) ... FAILED")
+  devSays(check, output, "error: doctest failed, to rerun pass `--doc`")
+
+  # The doctest is the only failure: with it corrected, the check passes.
+  let corrected = workspace.withExec(
+    ["sed", "-i", "s/halve(42), 20/halve(42), 21/", "/test-doctest/src/lib.rs"],
+  )
+  devStdout(corrected, run, devTestChecks)
+  [
+    devHeld(
+      "test-doctest: in a workspace with a single member, where Cargo's hint is `--doc` and "
+        + "names no package, a failing doctest fails the package's check, with the doctest's "
+        + "failure; with the doctest corrected the check passes",
+    ),
+  ]
+}
+
+# The fixtures with every kind of Cargo target, and with a package outside the
+# workspace root. The dependency layer's test flavour builds every stub of the
+# recipe and fails if one does not compile, so the test checks pass only when
+# each stub does.
+let devTestStubs(run: DevRun!): [String!]! {
+  # Each with a file of this run in a package, which makes the checks new.
+  let outside = "includeExtraFiles = [\"shared/**\"]\n"
+  devEach([
+    {{fixture: "build-kinds", settings: "", package: "user"}},
+    {{fixture: "build-outside", settings: outside, package: "app"}},
+  ]) { stub =>
+    let workspace = devConsumer(run, stub.fixture, stub.settings)
+      .withNewFile(
+        "/" + stub.fixture + "/" + stub.package + "/acceptance-run.txt",
+        run.next,
+      )
+    let steps = devSteps(workspace, run, devTestChecks)
+    devEach(devTestDependencies) { command =>
+      devTestCommand("the tests of " + stub.fixture, steps, command)
+    }
+  }
+  [
+    devHeld(
+      "build-kinds, build-outside: the test checks pass for a workspace with a procedural "
+        + "macro, a build script, a binary, an example, an integration test and a benchmark "
+        + "without the test harness, and for one that depends by path on a package outside its "
+        + "root: the dependency layer's test flavour builds over each stub of the recipe, and "
+        + "tolerates no failure",
+    ),
+  ]
+}
+
+# The test-suite fixture: what runs, what each kind of edit runs again, how
+# failures are reported, and the settings.
+let devTestOverSuite(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devTestPackages.reduce(devConsumer(run, devTestSuite, "")) { files, package =>
+    files.withNewFile(
+      "/" + devTestSuite + "/" + package.directory + "/acceptance-run.txt",
+      run.next,
+    )
+  }
+
+  let first = devSteps(workspace, run, devTestChecks)
+  let firstCheck = "the first run of the tests"
+  devStateOf(firstCheck, first, devTestBuild, "DONE")
+  devEach(devTestPackages) { package =>
+    devTestRunState(firstCheck, first, package, "DONE")
+  }
+  devStateOf(firstCheck, first, devTestDoctests, "DONE")
+  if (first.any { step => step.command.hasPrefix("sh ") or step.command.hasPrefix("bash ") }) {
+    raise devCheckFailed(firstCheck, "ran a shell:\n" + devDescribed(first))
+  }
+  passed += [
+    devHeld(
+      "test-suite: the test checks pass: one cargo nextest list builds the four packages' "
+        + "test binaries, each package's tests run in a cargo nextest run of their own, and one "
+        + "cargo test --doc runs the doctests; no step runs a shell",
+    ),
+  ]
+
+  let layer = devWorkspaceCall(
+    ".",
+    ["test-dependencies", "directory", "--path", devTestTarget, "glob", "--pattern", "**"],
+  )
+  let outputs = devStdout(workspace, run, layer)
+  if (devLines(outputs).any { line => line.contains("cfg_if") } == false
+    or devLines(outputs).any { line => line.contains("suite") }) {
+    raise devCheckFailed("the dependency layer's test flavour", "holds\n" + devTail(outputs))
+  }
+  passed += [
+    devHeld(
+      "test-suite: the dependency layer's test flavour holds the compiled dependency cfg-if "
+        + "and no output of the workspace's own packages",
+    ),
+  ]
+
+  let second = devSteps(workspace, run, devTestChecks)
+  if (second.any { step => step.state != "CACHED" }) {
+    raise devCheckFailed(
+      "a second run of the tests",
+      "ran a command again:\n" + devDescribed(second),
+    )
+  }
+  passed += [devHeld("test-suite: a second run over unchanged inputs runs no command")]
+
+  # A new item in a package nothing depends on.
+  let edited = workspace.withExec(
+    [
+      "sed",
+      "-i",
+      "$ a pub const EDITED: &str = \"" + run.next + "\";",
+      "/" + devTestSuite + "/crates/lone/src/lib.rs",
+    ],
+  )
+  let afterLone = devSteps(edited, run, devTestChecks)
+  let loneCheck = "the tests after an edit to crates/lone"
+  devStateOf(loneCheck, afterLone, devTestPrepare, "CACHED")
+  devEach(devTestRecipe + devTestDependencies) { command =>
+    devStateOf(loneCheck, afterLone, command, "CACHED")
+  }
+  devStateOf(loneCheck, afterLone, devTestBuild, "DONE")
+  devStateOf(loneCheck, afterLone, devTestDoctests, "DONE")
+  devTestRunState(loneCheck, afterLone, devTestLone, "DONE")
+  devEach([devTestBase, devTestMid, devTestTool]) { package =>
+    devTestRunState(loneCheck, afterLone, package, "CACHED")
+  }
+  passed += [
+    devHeld(
+      "test-suite: after an edit to crates/lone the recipe, the fetch and the dependency "
+        + "layer are cached and the test build runs again; the run of crates/lone runs again and "
+        + "the runs of crates/base, crates/mid and crates/tool are cached; the shared doctest "
+        + "step runs again",
+    ),
+  ]
+
+  # A changed value in the package the others link.
+  let relinked = edited.withExec(
+    [
+      "sed",
+      "-i",
+      "s/\"base\"/\"" + run.next + "\"/",
+      "/" + devTestSuite + "/crates/base/src/lib.rs",
+    ],
+  )
+  let afterBase = devSteps(relinked, run, devTestChecks)
+  let baseCheck = "the tests after an edit to crates/base"
+  devEach(devTestDependencies) { command =>
+    devStateOf(baseCheck, afterBase, command, "CACHED")
+  }
+  devEach([devTestBase, devTestMid, devTestTool]) { package =>
+    devTestRunState(baseCheck, afterBase, package, "DONE")
+  }
+  devTestRunState(baseCheck, afterBase, devTestLone, "CACHED")
+  passed += [
+    devHeld(
+      "test-suite: after an edit to crates/base, which crates/mid and crates/tool link, their "
+        + "three runs run again and the run of crates/lone is cached",
+    ),
+  ]
+
+  # The package's own files are part of its run's key, its binaries being the
+  # same.
+  let data = "/" + devTestSuite + "/crates/mid/tests/data/suffix.txt"
+  let redated = relinked.withNewFile(data, " on unix\n\n")
+  let afterData = devSteps(redated, run, devTestChecks)
+  let dataCheck = "the tests after an edit to the test data of crates/mid"
+  devTestRunState(dataCheck, afterData, devTestMid, "DONE")
+  devEach([devTestBase, devTestLone, devTestTool]) { package =>
+    devTestRunState(dataCheck, afterData, package, "CACHED")
+  }
+  passed += [
+    devHeld(
+      "test-suite: after an edit to the test data of crates/mid its run runs again, and the "
+        + "other three are cached",
+    ),
+  ]
+
+  # A release bump: the member's version, in its manifest and in the lockfile.
+  # The recipe masks it.
+  let version = "0.2.0-" + run.next
+  let released = redated
+    .withExec([
+      "sed",
+      "-i",
+      "s/^version = \"0.1.0\"$/version = \"" + version + "\"/",
+      "/" + devTestSuite + "/crates/lone/Cargo.toml",
+    ])
+    .withExec([
+      "sed",
+      "-i",
+      "/^name = \"suite-lone\"$/{n;s/^version = .*$/version = \"" + version + "\"/}",
+      "/" + devTestSuite + "/Cargo.lock",
+    ])
+  let afterRelease = devSteps(released, run, devTestChecks)
+  let releaseCheck = "the tests after a release bump"
+  devStateOf(releaseCheck, afterRelease, devTestPrepare, "DONE")
+  devEach(devTestRecipe + devTestDependencies) { command =>
+    devStateOf(releaseCheck, afterRelease, command, "CACHED")
+  }
+  devStateOf(releaseCheck, afterRelease, devTestBuild, "DONE")
+  passed += [
+    devHeld(
+      "test-suite: after a member's version changes in its manifest and in Cargo.lock, the "
+        + "recipe is written again and comes out the same: the fetch and the dependency layer "
+        + "stay cached, and the test build runs again",
+    ),
+  ]
+
+  # A feature of a member is part of the recipe.
+  let featured = redated
+    .withExec(["sed", "-i", "$ a [features]", "/" + devTestSuite + "/crates/lone/Cargo.toml"])
+    .withExec([
+      "sed",
+      "-i",
+      "$ a acceptance-" + run.next + " = []",
+      "/" + devTestSuite + "/crates/lone/Cargo.toml",
+    ])
+  let afterFeature = devSteps(featured, run, devTestChecks)
+  let featureCheck = "the tests after a manifest gains a feature"
+  devStateOf(featureCheck, afterFeature, devTestPrepare, "DONE")
+  devEach(devTestRecipe + devTestDependencies) { command =>
+    devStateOf(featureCheck, afterFeature, command, "DONE")
+  }
+  passed += [
+    devHeld(
+      "test-suite: after a manifest gains a feature, the recipe differs: the fetch runs "
+        + "again and the dependency layer is built again",
+    ),
+  ]
+
+  let failing = redated.withExec(
+    [
+      "sed",
+      "-i",
+      "$ a #[test] fn broken() { panic!(\"deliberate\"); }",
+      "/test-suite/crates/lone/src/lib.rs",
+    ],
+  )
+  let failed = devTestFailure(failing, run, devTestChecks)
+  let failedCheck = "the tests with a failing test in crates/lone"
+  devTestVerdicts(failedCheck, failed, [devTestLone], [devTestBase, devTestMid, devTestTool])
+  devSays(failedCheck, failed, "rust: test failed in crates/lone:")
+  devTestReported(failedCheck, failed, "PASS", "suite-lone tests::tells_even_from_odd")
+  devTestReported(failedCheck, failed, "FAIL", "suite-lone broken")
+  devSays(failedCheck, failed, "deliberate")
+  passed += [
+    devHeld(
+      "test-suite: a failing test fails its package's check alone, with \"rust: test failed "
+        + "in crates/lone:\" and cargo-nextest's report: the package's other test passed, the "
+        + "test failed, and what it printed",
+    ),
+  ]
+
+  let misread = redated.withNewFile(data, "elsewhere\n")
+  let misreadOutput = devTestFailure(misread, run, devTestChecks)
+  let misreadCheck = "the tests with other test data in crates/mid"
+  devTestVerdicts(
+    misreadCheck,
+    misreadOutput,
+    [devTestMid],
+    [devTestBase, devTestLone, devTestTool],
+  )
+  devTestReported(misreadCheck, misreadOutput, "PASS", "suite-mid tests::phrases")
+  devTestReported(misreadCheck, misreadOutput, "FAIL", "suite-mid::data reads_its_own_data")
+  passed += [
+    devHeld(
+      "test-suite: an integration test runs in its package's directory and reads the "
+        + "package's own files: with other test data, the check of crates/mid fails alone",
+    ),
+  ]
+
+  let silent = redated.withExec(
+    [
+      "sed",
+      "-i",
+      "s/println!.*/println!(\"silent\");/",
+      "/test-suite/crates/tool/src/main.rs",
+    ],
+  )
+  let silentOutput = devTestFailure(silent, run, devTestChecks)
+  let silentCheck = "the tests with another binary in crates/tool"
+  devTestVerdicts(
+    silentCheck,
+    silentOutput,
+    [devTestTool],
+    [devTestBase, devTestLone, devTestMid],
+  )
+  devTestReported(silentCheck, silentOutput, "FAIL", "suite-tool::cli prints_the_phrase")
+  passed += [
+    devHeld(
+      "test-suite: an integration test runs the binary that the test build made of its "
+        + "package: after an edit to what the binary prints, the check of crates/tool fails "
+        + "alone",
+    ),
+  ]
+
+  let undocumented = redated.withExec(
+    [
+      "sed",
+      "-i",
+      "s/double(21), 42/double(21), 43/",
+      "/test-suite/crates/base/src/lib.rs",
+    ],
+  )
+  let doctestOutput = devTestFailure(undocumented, run, devTestChecks)
+  let doctestCheck = "the tests with a failing doctest in crates/base"
+  devTestVerdicts(
+    doctestCheck,
+    doctestOutput,
+    [devTestBase],
+    [devTestLone, devTestMid, devTestTool],
+  )
+  devSays(doctestCheck, doctestOutput, "rust: test failed in crates/base:")
+  devSays(doctestCheck, doctestOutput, "Doc-tests suite_base")
+  devSays(doctestCheck, doctestOutput, "crates/base/src/lib.rs - double (line 10) ... FAILED")
+  passed += [
+    devHeld(
+      "test-suite: a failing doctest fails its package's check alone, with the package's "
+        + "share of the shared doctest step's output",
+    ),
+  ]
+
+  let broken = redated.withExec(
+    [
+      "sed",
+      "-i",
+      "$ a pub fn broken() -> u64 { \"not a number\" }",
+      "/test-suite/crates/tool/src/main.rs",
+    ],
+  )
+  let brokenOutput = devTestFailure(broken, run, devTestChecks)
+  let brokenCheck = "the tests with a compile error in crates/tool"
+  devTestVerdicts(
+    brokenCheck,
+    brokenOutput,
+    [devTestBase, devTestLone, devTestMid, devTestTool],
+    [],
+  )
+  devSays(brokenCheck, brokenOutput, "error[E0308]: mismatched types")
+  devSays(brokenCheck, brokenOutput, "could not compile `suite-tool`")
+  devSays(brokenCheck, brokenOutput, "rust: test failed in crates/base:")
+  devSays(brokenCheck, brokenOutput, "not tested: the test build failed.")
+  # Cargo names each package it compiles. crates/tool links crates/mid, which
+  # links cfg-if: the build compiled the first and found the second in the
+  # dependency layer.
+  devSays(brokenCheck, brokenOutput, "Compiling suite-mid")
+  if (brokenOutput.contains("Compiling cfg-if")) {
+    raise devCheckFailed(
+      brokenCheck,
+      "compiled the dependency cfg-if again:\n" + devTail(brokenOutput),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-suite: a compile error fails the check of every selected package: that of "
+        + "crates/tool with Cargo's diagnostics, and the others with \"not tested: the test "
+        + "build failed.\" before them; Cargo's output shows that the build compiled the "
+        + "packages and not the dependency cfg-if",
+    ),
+  ]
+
+  let narrowed = devConfigured(broken, run, devTestSuite, "test = [\"**\", \"!crates/tool\"]\n")
+  let narrowedSteps = devSteps(narrowed, run, devTestChecks)
+  let narrowedCheck = "the tests under test = [\"**\", \"!crates/tool\"]"
+  let narrowedBuild = devTestCommand(narrowedCheck, narrowedSteps, devTestBuild)
+  if (narrowedBuild.contains("-p suite-base -p suite-lone -p suite-mid") == false
+    or narrowedBuild.contains("suite-tool")
+    or narrowedBuild.contains("--workspace")) {
+    raise devCheckFailed(
+      narrowedCheck,
+      "built with `" + narrowedBuild + "`, not the three other packages alone",
+    )
+  }
+  if (devTestRuns(narrowedSteps, devTestTool).length > 0) {
+    raise devCheckFailed(narrowedCheck, "ran crates/tool:\n" + devDescribed(narrowedSteps))
+  }
+  passed += [
+    devHeld(
+      "test-suite: under test = [\"**\", \"!crates/tool\"] the build names the other three "
+        + "packages with -p, and the checks pass although crates/tool does not compile",
+    ),
+  ]
+
+  let only = ["check", "--check=test", "--rust-package=crates/base"]
+  let onlySteps = devSteps(redated, run, only)
+  let onlyCheck = "the tests of --rust-package=crates/base"
+  let onlyBuild = devTestCommand(onlyCheck, onlySteps, devTestBuild)
+  if (onlyBuild.contains("-p suite-base") == false or onlyBuild.contains("suite-mid")) {
+    raise devCheckFailed(onlyCheck, "built with `" + onlyBuild + "`, not crates/base alone")
+  }
+  if (devTestRuns(onlySteps, devTestBase).length == 0
+    or devTestRuns(onlySteps, devTestMid).length > 0) {
+    raise devCheckFailed(
+      onlyCheck,
+      "did not run crates/base alone:\n" + devDescribed(onlySteps),
+    )
+  }
+  passed += [devHeld("test-suite: --rust-package=crates/base builds and runs that package alone")]
+
+  let loose = devConfigured(redated, run, devTestSuite, "locked = false\n")
+  let looseBuild = devTestCommand(
+    "the tests under locked = false",
+    devSteps(loose, run, devTestChecks),
+    devTestBuild,
+  )
+  if (looseBuild.contains("--locked")) {
+    raise devCheckFailed("the tests under locked = false", "built with `" + looseBuild + "`")
+  }
+  passed += [
+    devHeld(
+      "test-suite: under locked = false the checks pass, and the build runs without --locked",
+    ),
+  ]
+
+  let withCargo = devConfigured(redated, run, devTestSuite, "testRunner = \"cargo\"\n")
+  let cargoSteps = devSteps(withCargo, run, devTestChecks)
+  let cargoCheck = "the tests under testRunner = \"cargo\""
+  devStateOf(cargoCheck, cargoSteps, devTestCargoBuild, "DONE")
+  devStateOf(cargoCheck, cargoSteps, devTestDoctests, "DONE")
+  let binaries = cargoSteps.filter { step => step.command.hasPrefix(devTestTarget) }.length
+  if (binaries != 6 or cargoSteps.any { step => step.command.contains("nextest") }) {
+    raise devCheckFailed(
+      cargoCheck,
+      "did not run the six test binaries, or ran cargo-nextest:\n" + devDescribed(cargoSteps),
+    )
+  }
+  let cargoFailing = devConfigured(failing, run, devTestSuite, "testRunner = \"cargo\"\n")
+  let cargoOutput = devTestFailure(cargoFailing, run, devTestChecks)
+  devTestVerdicts(cargoCheck, cargoOutput, [devTestLone], [devTestBase, devTestMid, devTestTool])
+  devSays(cargoCheck, cargoOutput, "rust: test failed in crates/lone:")
+  devSays(cargoCheck, cargoOutput, "test tests::tells_even_from_odd ... ok")
+  devSays(cargoCheck, cargoOutput, "test broken ... FAILED")
+  passed += [
+    devHeld(
+      "test-suite: under testRunner = \"cargo\" the build is cargo test --no-run, each of the "
+        + "six test binaries runs in a step of its own without cargo-nextest, and a failing test "
+        + "fails its package's check alone with the test harness's report",
+    ),
+  ]
+  passed
+}
+
+# Checks that the test check of a package that the `test` setting leaves out
+# passes without its lane: no command of the lane runs.
+let devTestSkipped(workspace: Container!, run: DevRun!, args: [String!]!): Void {
+  let steps = devSteps(workspace, run, args)
+  if (steps.any { step =>
+    step.command.hasPrefix("cargo nextest") or step.command.hasPrefix("cargo test")
+  }) {
+    raise devCheckFailed(
+      "dagger " + args.join(" "),
+      "reached the test lane:\n" + devDescribed(steps),
+    )
+  }
+  null
+}
+
+# Checks that the test check of a package reaches its lane and passes: the
+# package's own run is among the commands, run or cached.
+let devTestReached(
+  workspace: Container!,
+  run: DevRun!,
+  args: [String!]!,
+  package: {{directory: String!, name: String!}}!,
+): Void {
+  let steps = devSteps(workspace, run, args)
+  if (devTestRuns(steps, package).length == 0) {
+    raise devCheckFailed(
+      "dagger " + args.join(" "),
+      "did not run the tests of " + package.directory + ":\n" + devDescribed(steps),
+    )
+  }
+  null
+}
+
+# Runs `dagger <args>`, which must fail, and returns what it prints, without
+# colours.
+let devTestFailure(workspace: Container!, run: DevRun!, args: [String!]!): String! {
+  devPlain(devFailing(workspace, run, args))
+}
+
+# A package's own runs under cargo-nextest, among a trace's commands: the
+# first is the one the assertions read.
+let devTestRuns(
+  steps: [DevExec!]!,
+  package: {{directory: String!, name: String!}}!,
+): [DevExec!]! {
+  steps.filter { step =>
+    step.command.hasPrefix("cargo nextest run")
+      and step.command.contains("package(=" + package.name + ")")
+  }
+}
+
+# Checks that a package's own run is among a trace's commands, in `state`.
+let devTestRunState(
+  check: String!,
+  steps: [DevExec!]!,
+  package: {{directory: String!, name: String!}}!,
+  state: String!,
+): Void {
+  let runs = devTestRuns(steps, package)
+  if (runs.length == 0 or runs[0]!.state != state) {
+    raise devCheckFailed(
+      check,
+      "expected the run of " + package.directory + " to be " + state + ", but traced\n"
+        + devDescribed(steps),
+    )
+  }
+  null
+}
+
+# The first command of a trace that starts with `command`.
+let devTestCommand(check: String!, steps: [DevExec!]!, command: String!): String! {
+  let found = steps.filter { step => step.command.hasPrefix(command) }
+  if (found.length == 0) {
+    raise devCheckFailed(check, "did not run `" + command + "`:\n" + devDescribed(steps))
+  }
+  found[0]!.command
+}
+
+# Checks that cargo-nextest's report, in a failed check's message, has a line
+# for `test` with `outcome`: `PASS` or `FAIL`.
+let devTestReported(
+  check: String!,
+  output: String!,
+  outcome: String!,
+  test: String!,
+): Void {
+  let mark = outcome + " ["
+  if (devLines(output).any { line => line.contains(mark) and devTrimEnd(line).hasSuffix(test) }
+    == false) {
+    raise devCheckFailed(
+      check,
+      "did not report " + outcome + " for " + test + ":\n" + devTail(output),
+    )
+  }
+  null
+}
+
+# Checks which packages' test checks a failed `dagger check` reports as
+# failed, and which as passed. It reports each check on a line of its own: a
+# mark, the check's address, how long it took and how it ended.
+let devTestVerdicts(
+  check: String!,
+  output: String!,
+  failed: [{{directory: String!, name: String!}}!]!,
+  passed: [{{directory: String!, name: String!}}!]!,
+): Void {
+  devEach([{{packages: failed, ending: " ERROR"}}, {{packages: passed, ending: " OK"}}]) { expected =>
+    devEach(expected.packages) { package =>
+      let address = "dag://?check=test&rust-workspace=.&rust-package=" + package.directory + " "
+      if (devLines(output).any { line =>
+        line.contains(address) and devTrimEnd(line).hasSuffix(expected.ending)
+      } == false) {
+        raise devCheckFailed(
+          check,
+          "did not report the check of " + package.directory + " as" + expected.ending + ":\n"
+            + devTail(output),
+        )
+      }
+    }
+  }
+  null
+}

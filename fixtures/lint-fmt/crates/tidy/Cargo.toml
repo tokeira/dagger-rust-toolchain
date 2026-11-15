@@ -1,0 +1,5 @@
+[package]
+name = "fmt-tidy"
+version = "0.1.0"
+edition = "2021"
+publish = false

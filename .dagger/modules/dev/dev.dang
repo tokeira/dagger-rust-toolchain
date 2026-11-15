@@ -1,0 +1,144 @@
+"""
+Development checks for the rust module.
+
+Each check installs the module of this repository in fixture workspaces and
+drives it with the Dagger CLI, as a repository that uses the module would.
+Together they check what the module lists, how its settings take effect,
+which steps run again after each kind of edit, and what each lane reports.
+
+The checks are independent: each passes alone, in any order, and beside the
+others. A check reads no state that another leaves on the engine. Its cache
+volumes have names of their own, and each step it expects to run takes a
+value of its own run as input.
+
+dangFormat is the generator that formats the repository's Dang source.
+"""
+type Dev {
+  """
+  Format the repository's Dang source with dang fmt.
+
+  It returns the changes that `dang fmt` makes to the `.dang` files at the
+  repository root, which are the module's, and to those of the dev module.
+  `dagger generate` writes them, and the engine's `stale` check fails when
+  there are any. `dang` is built from source, at the commit of Dang that the
+  engine of the module's engineVersion embeds, so it formats the language
+  that engine reads.
+  """
+  dangFormat(ws: Workspace!): Changeset! @generate {
+    let files = ["*.dang", ".dagger/modules/dev/*.dang"]
+    let source = ws.directory("/", include: files)
+    let formatted = container
+      .from(devGoImage)
+      .withFile("/usr/local/bin/dang", devDang)
+      .withDirectory("/source", source)
+      .withWorkdir("/source")
+      .withExec(["dang", "fmt", "-w", ".", ".dagger/modules/dev"])
+      .directory("/source")
+    formatted.filter(include: files).changes(source)
+  }
+
+  """
+  Check a package at the repository root: its keys, the check addresses and the settings.
+  """
+  singlePackage(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "single-package")
+    devPassed(run, devCoreSingle(run))
+  }
+
+  """
+  Check a workspace of several members: its keys, the package settings and the layers.
+
+  The layers are the toolchain, fmt toolchain and fetch layers: what each
+  holds, and which steps a second run, a source edit and a manifest edit run
+  again.
+  """
+  workspaceMembers(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "workspace-members")
+    devPassed(run, devCoreMembers(run))
+  }
+
+  """
+  Check a repository of two workspaces: their keys, selection and separate inputs.
+  """
+  twoWorkspaces(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "two-workspaces")
+    devPassed(run, devCorePair(run))
+  }
+
+  """
+  Check a workspace in a directory of another: their keys and separate inputs.
+  """
+  nestedWorkspaces(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "nested-workspaces")
+    devPassed(run, devCoreNested(run))
+  }
+
+  """
+  Check the workspaceRoots setting, and the fmt and deny lanes.
+  """
+  lintLanes(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "lint-lanes")
+    devPassed(run, devLint(run))
+  }
+
+  """
+  Check the recipe, the dependency layer, and the check, clippy and doc lanes.
+  """
+  buildLanes(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "build-lanes")
+    devPassed(run, devBuild(run))
+  }
+
+  """
+  Check the test lane: its runner, its dependency layer, the test build and the runs.
+  """
+  testLane(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "test-lane")
+    devPassed(run, devTest(run))
+  }
+
+  """
+  Check the compile lanes' cache volumes, and the helper that runs a lane's step.
+  """
+  cacheVolumes(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "cache-volumes")
+    devPassed(run, devCache(run))
+  }
+
+  """
+  Check that the six lanes of one workspace share one recipe and one fetch.
+  """
+  sharedLayers(ws: Workspace!): Void @check @cache(policy: FunctionCachePolicy.NEVER) {
+    let run = devBegin(ws, "shared-layers")
+    devPassed(run, devCoreShared(run))
+  }
+}
+
+# Where Dang's source is, and the commit `dang` is built from: the one that
+# the engine of `devDaggerVersion` embeds. Its `go.mod` requires
+# `github.com/vito/dang/v2 v2.3.1-0.20261103042248-00dc3801b409`.
+let devDangRepository: String! = "https://github.com/vito/dang"
+
+let devDangCommit: String! = "00dc3801b40963aedc3439ba8d636600f0873987"
+
+# The image `dang` is built in, by the digest of its multi-platform index: Go
+# 1.26, the line that the engine of `devDaggerVersion` is built with.
+let devGoImage: String! = "golang:1.26.11-alpine3.24@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb"
+
+# The `dang` command, built from Dang's source at `devDangCommit`. The engine
+# fetches the commit by its full name, which names its content. Go takes the
+# dependencies from its module proxy and checks each against the `go.sum` of
+# that commit, and changes neither `go.mod` nor `go.sum`. The build uses the
+# image's own Go and no C compiler, so the command is linked statically. The
+# step is keyed on the commit and the image.
+let devDang: File! {
+  container
+    .from(devGoImage)
+    .withEnvVariable("CGO_ENABLED", "0")
+    .withEnvVariable("GOTOOLCHAIN", "local")
+    .withEnvVariable("GOFLAGS", "-mod=readonly")
+    .withMountedDirectory("/dang", git(devDangRepository).commit(devDangCommit).tree)
+    .withWorkdir("/dang")
+    .withExec(["go", "build", "-buildvcs=false", "-trimpath", "-o", "/usr/local/bin/dang", "./cmd/dang"])
+    .file("/usr/local/bin/dang")
+}

@@ -1,0 +1,561 @@
+# The assertions about the module's core: discovery, the two collections, the
+# settings, the toolchain and fetch layers, and that the lanes of a workspace
+# share them.
+
+# The single-package fixture: keys, check addresses, and settings.
+let devCoreSingle(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "single", "")
+
+  let only = [{{root: ".", packages: ["."]}}]
+  devListed(workspace, run, [], devLinks(only))
+  passed += [
+    devHeld(
+      "single: a package with its own Cargo.lock is the workspace \".\" with the package \".\"",
+    ),
+  ]
+
+  let addresses = [
+    "rust/workspaces/check",
+    "rust/workspaces/deny",
+    "rust/workspaces/doc",
+    "rust/workspaces/packages/clippy",
+    "rust/workspaces/packages/fmt/stale",
+    "rust/workspaces/packages/test",
+  ]
+  let checks = devStdout(workspace, run, ["check", "-l", "-f=link", "-s"])
+  devSameLines(
+    "dagger check -l -f=link",
+    checks,
+    addresses.map { address => "dag+check://?check=" + address },
+  )
+  let generators = devStdout(workspace, run, ["generate", "-l", "-f=link", "-s"])
+  devSameLines(
+    "dagger generate -l -f=link",
+    generators,
+    ["dag+generator://?generator=rust/workspaces/packages/fmt"],
+  )
+  passed += [
+    devHeld(
+      "single: the check addresses are " + addresses.join(", ")
+        + ", and the generator's is rust/workspaces/packages/fmt",
+    ),
+  ]
+
+  let flags = ["call", "rust", "cargo-flags"]
+  devPrints(workspace, run, flags, ["--locked"])
+  devPrints(workspace, run, devWorkspaceCall(".", ["workdir"]), ["/src/single"])
+  # What the module derives with no volumePrefix setting.
+  let derived = devInstalled(workspace, "single", "")
+  devPrints(derived, run, devWorkspaceCall(".", ["volume-prefix"]), ["single"])
+  passed += [
+    devHeld(
+      "single: by default Cargo gets --locked, the workspace is mounted at /src/single and "
+        + "its volume prefix is single",
+    ),
+  ]
+
+  let adjusted = devConfigured(
+    workspace,
+    run,
+    "single",
+    "locked = false\nfeatures = [\"alpha\", \"beta\"]\nnoDefaultFeatures = true\n"
+      + "buildProfile = \"release\"\ntarget = \"wasm32-unknown-unknown\"\n"
+      + "volumePrefix = \"shared\"\nmountPath = \"/work\"\nsystemPackages = [\"jq\"]\n",
+  )
+  devPrints(
+    adjusted,
+    run,
+    flags,
+    [
+      "--profile",
+      "release",
+      "--target",
+      "wasm32-unknown-unknown",
+      "--features",
+      "alpha,beta",
+      "--no-default-features",
+    ],
+  )
+  devPrints(adjusted, run, devWorkspaceCall(".", ["workdir"]), ["/work"])
+  devPrints(adjusted, run, devWorkspaceCall(".", ["volume-prefix"]), ["shared"])
+  passed += [
+    devHeld(
+      "single: locked, features, noDefaultFeatures, buildProfile and target set Cargo's "
+        + "flags; mountPath and volumePrefix set the mount path and the volume prefix",
+    ),
+  ]
+
+  let installed = ["toolchain", "with-exec", "--args", "rustup,target,list,--installed", "stdout"]
+  let targets = devStdout(adjusted, run, devWorkspaceCall(".", installed))
+  if (devLines(targets).contains("wasm32-unknown-unknown") == false) {
+    raise devCheckFailed(
+      "the toolchain layer under target",
+      "has the targets " + devQuoted(targets) + ", not wasm32-unknown-unknown",
+    )
+  }
+  let version = ["toolchain", "with-exec", "--args", "jq,--version", "stdout"]
+  let jq = devStdout(adjusted, run, devWorkspaceCall(".", version))
+  if (jq.hasPrefix("jq-") == false) {
+    raise devCheckFailed(
+      "the toolchain layer under systemPackages",
+      "answered jq --version with " + devQuoted(jq),
+    )
+  }
+  passed += [
+    devHeld(
+      "single: under target and systemPackages the toolchain layer has the target's standard "
+        + "library and the package jq",
+    ),
+  ]
+
+  let linting = devConfigured(
+    workspace,
+    run,
+    "single",
+    "clippyArgs = [\"-D\", \"warnings\"]\ntestRunner = \"cargo\"\n",
+  )
+  devPrints(linting, run, ["call", "rust", "clippy-args"], ["-D", "warnings"])
+  devPrints(linting, run, ["call", "rust", "test-runner"], ["cargo"])
+  let bogus = devConfigured(workspace, run, "single", "testRunner = \"bogus\"\n")
+  devRefused(bogus, run, flags, "rust: testRunner must be \"nextest\" or \"cargo\": bogus")
+  passed += [
+    devHeld(
+      "single: clippyArgs and testRunner reach the module, and a testRunner other than "
+        + "nextest or cargo is refused",
+    ),
+  ]
+
+  # An image that cannot be pulled shows that base is used in its place.
+  let based = devConfigured(
+    workspace,
+    run,
+    "single",
+    "base = \"" + devToolsImage + "\"\nimage = \"registry.invalid/none:0\"\n",
+  )
+  devListed(based, run, [], devLinks(only))
+  let rustc = ["toolchain", "with-exec", "--args", "rustc,--version", "stdout"]
+  let compiler = devStdout(based, run, devWorkspaceCall(".", rustc))
+  if (compiler.hasPrefix("rustc ") == false) {
+    raise devCheckFailed(
+      "the toolchain layer under base",
+      "answered rustc --version with " + devQuoted(compiler),
+    )
+  }
+  passed += [
+    devHeld(
+      "single: under base, discovery and the toolchain layer run in that container and "
+        + "never pull the image",
+    ),
+  ]
+  passed
+}
+
+# The multi-member fixture: keys, the package settings, the toolchain layers,
+# and what each kind of edit re-executes.
+let devCoreMembers(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "members", "")
+  let root = [{{root: ".", packages: ["crates/app", "crates/core", "crates/core/derive"]}}]
+
+  devListed(workspace, run, [], devLinks(root))
+  passed += [
+    devHeld(
+      "members: the workspace \".\" holds crates/app and crates/core (glob members) and "
+        + "crates/core/derive (a nested member), and not crates/skipped (excluded)",
+    ),
+  ]
+
+  # The image's own toolchain, by the version in its tag.
+  let image = devStdout(workspace, run, ["call", "rust", "image"])
+  let tagged = image.split(":", limit: 2).dropFirst(1).join("").split("-", limit: 2)
+  if (tagged.length < 2) {
+    raise devCheckFailed("the image setting", "is " + devQuoted(image) + ", with no version tag")
+  }
+  let imageVersion = tagged[0]!
+
+  let adjusted = devConfigured(
+    workspace,
+    run,
+    "members",
+    "clippy = [\"**\", \"!crates/app\"]\ntest = [\"crates/core\"]\nallFeatures = true\n"
+      + "fmtToolchain = \"" + imageVersion + "\"\n",
+  )
+  let app = "--rust-package=crates/app"
+  devStdout(adjusted, run, ["check", "--check=clippy", app])
+  devTestSkipped(adjusted, run, ["check", "--check=test", app])
+  let core = ["check", "--check=clippy", "--rust-package=crates/core"]
+  devBuildReachesClippy(adjusted, run, core, "members-core", "members-app")
+  let derive = ["check", "--check=test", "--rust-package=crates/core/derive"]
+  devTestReached(adjusted, run, derive, {{
+    directory: "crates/core/derive",
+    name: "members-derive"
+  }})
+  passed += [
+    devHeld(
+      "members: under clippy = [\"**\", \"!crates/app\"] the clippy check of crates/app "
+        + "passes without its lane and that of crates/core reaches its lane; under test = "
+        + "[\"crates/core\"] the test check of crates/app passes without its lane, and that of "
+        + "crates/core/derive runs its lane and passes",
+    ),
+  ]
+
+  let flags = ["call", "rust", "cargo-flags"]
+  devPrints(adjusted, run, flags, ["--locked", "--all-features"])
+  let rustc = ["with-exec", "--args", "rustc,--version", "stdout"]
+  let toolchain = devStdout(adjusted, run, devWorkspaceCall(".", ["toolchain"] + rustc))
+  let fmtToolchain = devStdout(adjusted, run, devWorkspaceCall(".", ["fmt-toolchain"] + rustc))
+  if (toolchain.hasPrefix("rustc 1.99.0 ") == false
+    or fmtToolchain.hasPrefix("rustc " + imageVersion + " ") == false) {
+    raise devCheckFailed(
+      "the toolchain layers",
+      "run " + devQuoted(toolchain) + " and, for rustfmt, " + devQuoted(fmtToolchain)
+        + ", not 1.99.0 and " + imageVersion,
+    )
+  }
+  passed += [
+    devHeld(
+      "members: allFeatures adds --all-features; the toolchain layer runs the 1.99.0 of "
+        + "rust-toolchain.toml, and under fmtToolchain = \"" + imageVersion
+        + "\" the fmt toolchain layer runs " + imageVersion,
+    ),
+  ]
+
+  let overridden = devConfigured(
+    workspace,
+    run,
+    "members",
+    "toolchain = \"" + imageVersion + "\"\n",
+  )
+  let pinned = devStdout(overridden, run, devWorkspaceCall(".", ["toolchain"] + rustc))
+  let cargo = ["fetched", "with-exec", "--args", "cargo,--version", "stdout"]
+  let fetching = devStdout(overridden, run, devWorkspaceCall(".", cargo))
+  if (pinned.hasPrefix("rustc " + imageVersion + " ") == false
+    or fetching.hasPrefix("cargo " + imageVersion + " ") == false) {
+    raise devCheckFailed(
+      "the layers under toolchain",
+      "run " + devQuoted(pinned) + " and " + devQuoted(fetching) + ", not " + imageVersion,
+    )
+  }
+  passed += [
+    devHeld(
+      "members: under toolchain = \"" + imageVersion + "\" the toolchain and fetch layers run "
+        + imageVersion + ", over the rust-toolchain.toml",
+    ),
+  ]
+
+  # The layers, under the default settings. The first pass may find them in
+  # the engine's cache or build them; the second must find every step there.
+  let toolchains = "/usr/local/rustup/toolchains"
+  let fetched = devWorkspaceCall(
+    ".",
+    ["fetched", "file", "--path", "/src/members/Cargo.lock", "contents"],
+  )
+  let withClippy = devWorkspaceCall(
+    ".",
+    ["toolchain", "--components", "clippy", "directory", "--path", toolchains, "entries"],
+  )
+  let forFmt = devWorkspaceCall(".", ["fmt-toolchain", "directory", "--path", toolchains, "entries"])
+  let registry = [
+    "fetched",
+    "directory",
+    "--path",
+    "/usr/local/cargo/registry",
+    "glob",
+    "--pattern",
+    "**/*.crate",
+  ]
+  let crates = devStdout(workspace, run, devWorkspaceCall(".", registry))
+  if (devLines(crates).any { line => line.contains("/cfg-if-") } == false) {
+    raise devCheckFailed("the fetch layer", "holds the crates " + devQuoted(crates) + ", not cfg-if")
+  }
+  devStdout(workspace, run, withClippy)
+  devStdout(workspace, run, forFmt)
+  passed += [
+    devHeld(
+      "members: the fetch layer holds the registry dependency cfg-if in Cargo's home, not in "
+        + "a cache volume",
+    ),
+  ]
+
+  # The fetch layer's steps: discovery's three, the skeleton's two, the
+  # toolchain install, cargo-chef's unpacking and its recipe, the recipe's
+  # four, and cargo fetch.
+  devEach([
+    {{layer: "fetch", command: fetched, steps: 13}},
+    {{layer: "toolchain", command: withClippy, steps: 5}},
+    {{layer: "fmt toolchain", command: forFmt, steps: 5}},
+  ]) { second =>
+    let execs = devTraced(workspace, run, second.command)
+    devAllCached("a second run of the " + second.layer + " layer", execs, second.steps)
+  }
+  passed += [
+    devHeld(
+      "members: a second run over unchanged inputs re-executes no step of the fetch, "
+        + "toolchain and fmt toolchain layers",
+    ),
+  ]
+
+  let edited = workspace
+    .withNewFile(
+      "/members/crates/core/src/edited.rs",
+      "pub const EDITED: &str = \"" + run.next + "\";\n",
+    )
+    .withExec([
+      "sed",
+      "-i",
+      "$ a // An edit that changes no manifest and no target path.",
+      "/members/crates/core/src/lib.rs",
+    ])
+  devAllCached(
+    "the fetch layer after a source edit",
+    devTraced(edited, run, fetched),
+    13,
+  )
+  devListed(edited, run, [], devLinks(root))
+  passed += [
+    devHeld(
+      "members: after an edit to a source file and a new source file, discovery and the "
+        + "fetch layer re-execute no step",
+    ),
+  ]
+
+  # The fetch layer runs over the recipe, which says what Cargo resolves and
+  # compiles and leaves out what does not change that, such as a comment. A
+  # feature is part of it.
+  let bumped = edited
+    .withExec(["sed", "-i", "$ a [features]", "/members/crates/core/Cargo.toml"])
+    .withExec(["sed", "-i", "$ a acceptance-" + run.next + " = []", "/members/crates/core/Cargo.toml"])
+  let refetched = devTraced(bumped, run, fetched)
+  let fetchCheck = "the fetch layer after a manifest gains a feature"
+  devStateOf(fetchCheck, refetched, "cargo chef prepare", "DONE")
+  devStateOf(fetchCheck, refetched, "cargo fetch --locked", "DONE")
+  devStateOf(
+    "the toolchain layer after a manifest gains a feature",
+    refetched,
+    "rustup toolchain install --no-self-update",
+    "CACHED",
+  )
+  passed += [
+    devHeld(
+      "members: after a manifest gains a feature, the recipe is written again and cargo "
+        + "fetch runs again, and the toolchain install does not",
+    ),
+  ]
+
+  let relisted = bumped.withExec(
+    ["sed", "-i", "$ a # " + run.next, "/members/crates/app/Cargo.toml"],
+  )
+  let listing = devTraced(relisted, run, ["check", "-l", "--all", "-f=link"])
+  let listCheck = "listing after a manifest edit"
+  devStateOf(listCheck, listing, "cargo metadata", "DONE")
+  if (listing.any { exec =>
+    exec.command.hasPrefix("xargs ") == false and exec.command.hasPrefix("cargo metadata") == false
+  }) {
+    raise devCheckFailed(
+      listCheck,
+      "ran more than the skeleton and cargo metadata:\n" + devDescribed(listing),
+    )
+  }
+  passed += [
+    devHeld(
+      "members: listing after a manifest edit runs the skeleton's commands and cargo "
+        + "metadata, and no other container command",
+    ),
+  ]
+  passed
+}
+
+# The fixture with two independent workspaces: keys, selection, the working
+# directory, and that one workspace's manifests are no input of the other's
+# layers.
+let devCorePair(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "pair", "")
+  let left = {{root: "left", packages: ["left/lib"]}}
+  let right = {{root: "right", packages: ["right", "right/helper"]}}
+
+  devListed(workspace, run, [], devLinks([left, right]))
+  passed += [
+    devHeld(
+      "pair: the repository holds the workspaces left (left/lib) and right (right, "
+        + "right/helper), keyed by directory relative to the repository root",
+    ),
+  ]
+
+  devListed(workspace, run, ["--rust-workspace=right"], devLinks([right]))
+  let inside = workspace.withWorkdir("/pair/left/lib")
+  devListed(inside, run, [], devLinks([left]))
+  passed += [
+    devHeld(
+      "pair: --rust-workspace=right selects the right workspace alone, and a command run in "
+        + "left/lib sees the left workspace alone",
+    ),
+  ]
+
+  devPrints(workspace, run, devWorkspaceCall("left", ["workdir"]), ["/src/pair/left"])
+  # What the module derives with no volumePrefix setting.
+  let derived = devInstalled(workspace, "pair", "")
+  devPrints(derived, run, devWorkspaceCall("left", ["volume-prefix"]), ["pair-left"])
+  devPrints(derived, run, devWorkspaceCall("right", ["volume-prefix"]), ["pair-right"])
+  devRefused(
+    workspace,
+    run,
+    devWorkspaceCall("left/lib", ["workdir"]),
+    "rust: no Cargo workspace is rooted at left/lib",
+  )
+  passed += [
+    devHeld(
+      "pair: with no volumePrefix setting each workspace has a volume prefix of its own, "
+        + "pair-left and pair-right, and a member's directory is not a workspace root",
+    ),
+  ]
+
+  let sources = ["source", "glob", "--pattern", "**/*.rs"]
+  let own = devStdout(workspace, run, devWorkspaceCall("left", sources))
+  devSameLines("the left workspace's source", own, ["left/lib/src/lib.rs"])
+  let extended = devConfigured(
+    workspace,
+    run,
+    "pair",
+    "includeExtraFiles = [\"right/helper/**\"]\n",
+  )
+  let withExtra = devStdout(extended, run, devWorkspaceCall("left", sources))
+  devSameLines(
+    "the left workspace's source with extra files",
+    withExtra,
+    ["left/lib/src/lib.rs", "right/helper/src/lib.rs"],
+  )
+  let manifests = ["skeleton", "glob", "--pattern", "**/Cargo.toml"]
+  let skeleton = devStdout(extended, run, devWorkspaceCall("left", manifests))
+  devSameLines(
+    "the left workspace's skeleton with extra files",
+    skeleton,
+    ["left/Cargo.toml", "left/lib/Cargo.toml", "right/helper/Cargo.toml"],
+  )
+  passed += [
+    devHeld(
+      "pair: the left workspace's source holds its own files alone, and under "
+        + "includeExtraFiles = [\"right/helper/**\"] also that package's files, whose manifest "
+        + "joins the skeleton",
+    ),
+  ]
+
+  let fetched = devWorkspaceCall(
+    "right",
+    ["fetched", "file", "--path", "/src/pair/right/Cargo.lock", "contents"],
+  )
+  devStdout(workspace, run, fetched)
+  let bumped = workspace.withExec(
+    ["sed", "-i", "$ a # " + run.next, "/pair/left/lib/Cargo.toml"],
+  )
+  let execs = devTraced(bumped, run, fetched)
+  devStateOf("discovery after a manifest edit", execs, "cargo metadata", "DONE")
+  devStateOf(
+    "the right workspace's fetch layer after an edit to the left's manifest",
+    execs,
+    "cargo fetch --locked",
+    "CACHED",
+  )
+  passed += [
+    devHeld(
+      "pair: an edit to a manifest of the left workspace reruns discovery and leaves the "
+        + "right workspace's fetch layer cached",
+    ),
+  ]
+  passed
+}
+
+# The fixture with a workspace in a directory of another: keys, and that each
+# workspace's inputs leave the other's files out.
+let devCoreNested(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "nested", "")
+  let outer = {{root: ".", packages: ["outer"]}}
+  let inner = {{root: "tools/inner", packages: ["tools/inner"]}}
+
+  devListed(workspace, run, [], devLinks([outer, inner]))
+  passed += [
+    devHeld(
+      "nested: the repository root and tools/inner are workspaces, and outer, a member that "
+        + "keeps a Cargo.lock, is a package and not a workspace",
+    ),
+  ]
+
+  let sources = ["source", "glob", "--pattern", "**/*.rs"]
+  let manifests = ["skeleton", "glob", "--pattern", "**/Cargo.toml"]
+  devSameLines(
+    "the outer workspace's source",
+    devStdout(workspace, run, devWorkspaceCall(".", sources)),
+    ["outer/src/lib.rs"],
+  )
+  devSameLines(
+    "the outer workspace's skeleton",
+    devStdout(workspace, run, devWorkspaceCall(".", manifests)),
+    ["Cargo.toml", "outer/Cargo.toml"],
+  )
+  devSameLines(
+    "the inner workspace's source",
+    devStdout(workspace, run, devWorkspaceCall("tools/inner", sources)),
+    ["tools/inner/src/main.rs"],
+  )
+  devSameLines(
+    "the inner workspace's skeleton",
+    devStdout(workspace, run, devWorkspaceCall("tools/inner", manifests)),
+    ["tools/inner/Cargo.toml"],
+  )
+  # What the module derives with no volumePrefix setting.
+  let derived = devInstalled(workspace, "nested", "")
+  devPrints(
+    derived,
+    run,
+    devWorkspaceCall("tools/inner", ["volume-prefix"]),
+    ["nested-tools-inner"],
+  )
+  passed += [
+    devHeld(
+      "nested: each workspace's source and skeleton hold its own files and not the other's, "
+        + "and the inner workspace's volume prefix is nested-tools-inner",
+    ),
+  ]
+  passed
+}
+
+# One workspace under every lane at once: the lanes share one recipe and one
+# fetch, so that a cold engine downloads each crate once. The workspace has a
+# registry dependency and a `deny.toml`.
+let devCoreShared(run: DevRun!): [String!]! {
+  # A file of this run makes the package checks new: the engine answers a
+  # package check that passed over the same files without running it.
+  let workspace = devConsumer(run, "lint-deny", "")
+    .withNewFile("/lint-deny/clean/acceptance-run.txt", run.next)
+  let execs = devTraced(workspace, run, ["check", "--rust-workspace=clean"])
+  let check = "every check of the workspace clean"
+  devEach([
+    "cargo fmt",
+    "cargo clippy",
+    "cargo nextest list",
+    "cargo check --quiet",
+    "cargo deny",
+    "cargo doc",
+  ]) { lane =>
+    if (execs.any { exec => exec.command.hasPrefix(lane) } == false) {
+      raise devCheckFailed(check, "did not run `" + lane + "`:\n" + devDescribed(execs))
+    }
+  }
+  devEach(["cargo chef prepare", "cargo-chef chef cook --no-build", "cargo fetch"]) { step =>
+    let steps = execs.filter { exec => exec.command.hasPrefix(step) }.length
+    if (steps != 1) {
+      raise devCheckFailed(
+        check,
+        "has " + toString(steps) + " steps of `" + step + "`, not one:\n" + devDescribed(execs),
+      )
+    }
+  }
+  [
+    devHeld(
+      "lint-deny: the six lanes of the workspace clean, which has a registry dependency and "
+        + "a deny.toml, run over one recipe and one cargo fetch",
+    ),
+  ]
+}

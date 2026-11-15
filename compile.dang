@@ -1,0 +1,216 @@
+# The compile lanes' cache volumes, and the one step that reads and writes
+# them. check, clippy, doc and the test build each compile the workspace's
+# members, and each keeps two volumes of its own so that Cargo compiles
+# again only what an edit changed:
+#
+#   <volumePrefix>-target-<lane>   the lane's target directory. The engine
+#                                  starts it from the target directory of
+#                                  the lane's dependency layer, and a volume
+#                                  is named by its key and by that
+#                                  directory: a dependency layer that
+#                                  changes has a new volume, started from
+#                                  the new layer.
+#   <volumePrefix>-source-<lane>   a mirror of the lane's source view, at the
+#                                  mount path. Cargo decides by modification
+#                                  time whether a member is up to date, and
+#                                  the mirror keeps the time of every file
+#                                  whose content did not change.
+#
+# Both are LOCKED: one step holds a volume at a time, and no lane waits for
+# another's. There is no registry volume: the crates come from the fetch
+# layer, a step keyed on its inputs that any engine cache can serve.
+#
+# The engine keys a step on its inputs and never on what a volume holds. A
+# step that only synced the mirror could be answered from the cache while
+# the volume holds another run's files, and Cargo would then build the wrong
+# tree under the right key. So one step does all of it: the helper, a
+# program built from this module's `helper` directory, makes the mirror
+# equal to the source view, runs Cargo, and copies what later steps read
+# out of the volume into the step's own filesystem. The module runs no
+# shell.
+#
+# What Cargo compiles again over a warm volume is Cargo's decision. It
+# tracks what rustc read file by file. It tracks rustdoc, and a build script
+# that names no file, by the newest time among a package's files, which
+# misses a file that is gone and a file outside the package. The helper
+# therefore gives a new time to the manifest of a package that lost a file,
+# and for the doc lane to every manifest whenever the tree changed:
+# helper/src/mirror.rs has the reasons.
+#
+# Building a helper program from the module's own source, in a pinned image,
+# follows gomod/main.dang of dagger.io/go (https://github.com/dagger/go),
+# Copyright 2022 Dagger, Inc., licensed under the Apache License, Version
+# 2.0. See NOTICE.
+
+# Where a compile lane finds the helper.
+let rustCompileHelperPath: String! = "/usr/local/bin/rust-lane-helper"
+
+# Where a compile lane's source view is mounted, for the helper to mirror.
+let rustCompileSource: String! = "/var/cache/rust/source"
+
+# Where the helper keeps what later steps read of a build, in the step's own
+# filesystem, at the paths the files have in the target directory.
+let rustCompileKept: String! = "/var/cache/rust/kept"
+
+# Where the helper reports what each of a lane's commands did: what the sync
+# wrote, removed and gave a new time, and the packages Cargo compiled and
+# documented.
+let rustCompileReport: String! = "/var/cache/rust/report"
+
+# The exit code of the helper's own failures, as against Cargo's.
+let rustCompileFailed: Int! = 125
+
+# The file of a target directory that holds the lane's marks: what its
+# command covers that Cargo cannot tell, such as the packages clippy lints.
+# A lane with marks writes them in the directory its target volume starts
+# from. The engine names a volume by that directory, so other marks get
+# another volume. The helper checks that the volume in hand has the marks in
+# the lane's own copy, at rustCompileMarked, and empties it if not.
+let rustCompileMarks: String! = ".rust-lane-volume"
+let rustCompileMarked: String! = "/var/cache/rust/marks"
+
+# The helper's source: the crate in the module's `helper` directory. Each
+# file is read as text, so the directory is keyed on what the files say, and
+# the helper is not built again when another file of the module changes.
+let rustCompileHelperSource(crate: Directory!): Directory! {
+  (["Cargo.toml", "Cargo.lock"] + crate.glob("src/**/*.rs")).reduce(directory) { source, file =>
+    source.withNewFile(file, crate.file(file).contents)
+  }
+}
+
+# The helper, for a platform. It is built in the module's pinned image
+# whatever the image and base settings say, from nothing but the helper's
+# source: every workspace on an engine shares one build. It is built for
+# musl and so linked statically, like the module's other tools: it runs in
+# any base.
+let rustCompileHelper(platform: Platform!): File! {
+  let name = `${platform}`.split("/").takeFirst(2).join("/")
+  let triple = if (name == "linux/amd64") {
+    "x86_64-unknown-linux-musl"
+  } else if (name == "linux/arm64") {
+    "aarch64-unknown-linux-musl"
+  } else {
+    raise "rust: the helper of the compile lanes is not built for " + name
+  }
+  container(platform: platform)
+    .from(rustPinnedImage)
+    .withExec(["rustup", "target", "add", triple])
+    .withMountedDirectory("/helper", rustCompileHelperSource(
+      currentModule.source.directory("helper"),
+    ))
+    .withWorkdir("/helper")
+    .withEnvVariable("CARGO_TARGET_DIR", "/var/cache/rust/helper")
+    .withExec(["cargo", "build", "--release", "--locked", "--offline", "--target", triple])
+    .file("/var/cache/rust/helper/" + triple + "/release/rust-lane-helper")
+}
+
+# A compile lane's source view: the workspace's source, and with locked off
+# the Cargo.lock that the fetch layer resolved in place of the source's. The
+# lockfile is read as text, so the view is keyed on what it says.
+let rustCompileView(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
+  if (workspace.tool.locked) { inputs.source } else {
+    inputs.source.withNewFile(
+      rustPathIn(workspace.path, "Cargo.lock"),
+      workspace.fetchedOf(inputs).file(rustDependenciesLock(workspace)).contents,
+    )
+  }
+}
+
+# The name of one of a lane's volumes: "target" or "source", for the lane
+# "check", "clippy", "doc" or "test".
+let rustCompileVolume(workspace: RustWorkspace!, holds: String!, lane: String!): String! {
+  workspace.volumePrefix + "-" + holds + "-" + lane
+}
+
+# A compile lane's container: `toolchain`, which is the toolchain layer with
+# the crates and the lane's environment, and then
+#
+#   the helper;
+#   the lane's source view, for the helper to mirror;
+#   the lane's source volume at the mount path, where Cargo runs;
+#   the lane's target volume at `target`, started from `dependencies`, the
+#   target directory of the lane's dependency layer.
+#
+# The dependencies are at the path they were compiled at, over the same
+# mount path and Cargo home and under the same settings, so Cargo finds them
+# fresh.
+let rustCompileLane(
+  workspace: RustWorkspace!,
+  inputs: RustInputs!,
+  lane: String!,
+  toolchain: Container!,
+  target: String!,
+  dependencies: Directory!,
+): Container! {
+  toolchain
+    .withMountedFile(rustCompileHelperPath, rustCompileHelper(toolchain.platform))
+    .withMountedDirectory(rustCompileSource, rustCompileView(workspace, inputs))
+    .withMountedCache(
+      workspace.mountPath,
+      cacheVolume(rustCompileVolume(workspace, "source", lane)),
+      sharing: LOCKED,
+    )
+    .withMountedCache(
+      target,
+      cacheVolume(rustCompileVolume(workspace, "target", lane)),
+      source: dependencies,
+      sharing: LOCKED,
+    )
+    .withEnvVariable("CARGO_TARGET_DIR", target)
+}
+
+# Runs a Cargo command in a compile lane's container, under the helper, and
+# returns the container to read the command's exit code and stderr from.
+# Its stdout is in the file `output`, or is the step's own when `output` is
+# "". `options` is the helper's other arguments, if any: what to keep for
+# later steps, which manifests of the mirror get a new time, and the marks
+# of the target volume.
+#
+# The step is kept or run once more as rustDependenciesRan says. A failure
+# of the helper's own, such as a full disk, is not the source's either: the
+# step then runs once more as one that must succeed.
+let rustCompileCargo(
+  workspace: RustWorkspace!,
+  lane: Container!,
+  command: [String!]!,
+  output: String!,
+  options: [String!]!,
+): Container! {
+  let none: [String!]! = []
+  rustDependenciesRan(
+    lane,
+    [
+      rustCompileHelperPath,
+      "--source", rustCompileSource,
+      "--mirror", workspace.mountPath,
+      "--report", rustCompileReport,
+    ]
+      + (if (output == "") { none } else { ["--stdout", output] })
+      + options
+      + ["--"]
+      + command,
+    "",
+    command,
+  )
+}
+
+# A compile lane's step over every package that the lane's setting selects,
+# for whoever inspects it: the container after the lane's last Cargo
+# command, with the helper's report at rustCompileReport.
+let rustCompileStep(
+  workspace: RustWorkspace!,
+  selection: RustPackages!,
+  lane: String!,
+): Container! {
+  if (lane == "check") {
+    rustCheckRun(workspace, selection.inputs).step
+  } else if (lane == "clippy") {
+    rustClippyRun(selection)
+  } else if (lane == "doc") {
+    rustDocRun(workspace, selection.inputs)
+  } else if (lane == "test") {
+    rustTestCompiled(selection)
+  } else {
+    raise "rust: no compile lane is named " + lane + ": the lanes are check, clippy, doc and test"
+  }
+}

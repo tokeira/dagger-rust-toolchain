@@ -1,0 +1,8 @@
+name = "rust"
+# The one release the module is tested on. The engine gives the module the
+# API and the naming rules of the release named here. README.md has the
+# details.
+engineVersion = "v1.0.0-beta.27"
+
+[runtime]
+  source = "dang"

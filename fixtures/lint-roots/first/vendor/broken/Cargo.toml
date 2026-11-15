@@ -1,0 +1,5 @@
+# A workspace that Cargo cannot load: its member does not exist. Discovery fails here
+# unless the `workspaceRoots` setting leaves this directory out.
+[workspace]
+resolver = "2"
+members = ["missing"]

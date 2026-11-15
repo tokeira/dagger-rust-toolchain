@@ -1,0 +1,114 @@
+# The dependency layer, test flavour: the workspace's dependencies compiled
+# with full code generation, as `cargo test` builds them, and nothing of the
+# workspace's own packages.
+#
+# It is keyed on the recipe, the toolchain layer, the fetch layer and the
+# settings that change compilation (buildProfile, features, allFeatures,
+# noDefaultFeatures, target, locked), and never on the contents of a source
+# file. The recipe is the workspace's own, `RustWorkspace.recipeOf`: the one
+# the fetch layer and the check flavour run over. cargo-chef masks the
+# members' versions in it, so a release bump leaves this layer cached. It
+# mounts no cache volume: the compiled dependencies are in the layer's own
+# filesystem, under rustTestTargetDir.
+
+# Where the test lane's Cargo commands build: beside the check flavour's
+# target directory, rustDependenciesTarget. A fixed path outside the mount
+# path: the layer keeps it when the source is mounted, and compiled outputs
+# name the same paths on every engine.
+let rustTestTargetDir: String! = "/var/cache/rust/target-test"
+
+# A container with the environment of the test lane's Cargo commands.
+# Incremental compilation is off, so that unchanged inputs give the same
+# binaries, byte for byte. The build directory, which a workspace's Cargo
+# configuration can move, is the target directory: the lane reads the test
+# binaries from there.
+let rustTestCargo(ctr: Container!): Container! {
+  ctr
+    .withEnvVariable("CARGO_TARGET_DIR", rustTestTargetDir)
+    .withEnvVariable("CARGO_BUILD_BUILD_DIR", rustTestTargetDir)
+    .withEnvVariable("CARGO_INCREMENTAL", "0")
+    .withEnvVariable("CARGO_TERM_COLOR", "never")
+}
+
+# A container with a view of the repository mounted for Cargo. With locked
+# off, the Cargo.lock that the fetch layer resolved is mounted over the
+# view's, so that every step builds what was fetched.
+let rustTestMounted(
+  workspace: RustWorkspace!,
+  inputs: RustInputs!,
+  ctr: Container!,
+  view: Directory!,
+): Container! {
+  let mounted = ctr.withMountedDirectory(workspace.mountPath, view)
+  if (workspace.tool.locked) { mounted } else {
+    let lock = workspace.workdir + "/Cargo.lock"
+    mounted.withMountedFile(lock, workspace.fetchedOf(inputs).file(lock))
+  }
+}
+
+# The profile and target flags of a build, as `cargo build` and `cargo clean`
+# take them. `cargo test` builds with the test profile unless the buildProfile
+# setting names another.
+let rustTestProfileFlags(tool: Rust!): [String!]! {
+  let none: [String!]! = []
+  ["--profile", tool.buildProfile ?? "test"]
+    + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
+}
+
+# The feature flags of the settings.
+let rustTestFeatureFlags(tool: Rust!): [String!]! {
+  let none: [String!]! = []
+  (if (tool.features.length == 0) { none } else { ["--features", tool.features.join(",")] })
+    + (if (tool.allFeatures) { ["--all-features"] } else { none })
+    + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
+}
+
+# The layer. Two commands make it:
+#
+#   cargo build --tests --workspace <flags>
+#     over the recipe, with the profile `cargo test` builds with. It compiles
+#     every dependency, and the members' stubs. cargo-chef's stubs compile,
+#     so a failure here is the dependencies' or the settings': a dependency
+#     that does not build, or a Cargo.lock that --locked refuses. The layer
+#     raises it with the end of Cargo's output. When a signal stopped a
+#     process, the command runs once more as a step that must succeed, so
+#     that the engine keeps no layer from a build that was killed.
+#   cargo clean <profile and target> -p <each local package>
+#     removes whatever the stubs compiled to. Cargo decides freshness by
+#     modification time, and would take a stub's output for the real
+#     package's if the sources were older than the layer. The packages are
+#     named with their versions, from the lockfile the build compiled with,
+#     so a dependency that shares a member's name stays compiled.
+let rustTestDependencies(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+  let tool = workspace.tool
+  let none: [String!]! = []
+  let locked = if (tool.locked) { ["--locked"] } else { none }
+  let compiled = rustDependenciesCargo(
+    rustTestMounted(
+      workspace,
+      inputs,
+      rustTestCargo(
+        workspace.withCrates(inputs, workspace.toolchainOf(inputs, [])),
+      ),
+      workspace.recipeOf(inputs),
+    ),
+    ["cargo", "build", "--tests", "--workspace"]
+      + locked + rustTestProfileFlags(tool) + rustTestFeatureFlags(tool),
+    "/tmp/rust-test-dependencies-output",
+  )
+  if (compiled.exitCode != 0) {
+    raise "rust: building the test dependencies failed in " + workspace.path + ":\n"
+      + rustTestTail(compiled.stderr)
+  }
+  let local = rustDependenciesLocal(compiled.file(rustDependenciesLock(workspace)).contents)
+    .reduce(none) { flags, package => flags + ["-p", package] }
+  let cleaned = compiled.withExec(
+    ["cargo", "clean"] + locked + rustTestProfileFlags(tool) + local,
+    expect: ANY,
+  )
+  if (cleaned.exitCode != 0) {
+    raise "rust: cleaning the test dependencies failed in " + workspace.path + ":\n"
+      + rustTestTail(cleaned.stderr)
+  }
+  cleaned
+}

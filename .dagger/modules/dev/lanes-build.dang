@@ -1,0 +1,646 @@
+# The acceptance of the dependency layer, check flavour, and of the check,
+# clippy and doc lanes: what each lane reports over the `build-` fixtures, and
+# which steps run again after each kind of edit.
+
+# `dagger check` for the three lanes at once.
+let devBuildChecks: [String!]! = ["check", "--check=check", "--check=clippy", "--check=doc"]
+
+# Where the dependency layer keeps what it compiled.
+let devBuildTarget: String! = "/var/cache/rust/target-check"
+
+# The steps of the dependency layer after its recipe is written, each by the
+# start of its command.
+let devBuildLayer: [String!]! = [
+  "cargo-chef chef cook --no-build",
+  "cargo fetch",
+  "cargo check --workspace",
+  "cargo clean",
+]
+
+# The lanes' own commands, each by its start.
+let devBuildCommands: [String!]! = ["cargo check --quiet", "cargo clippy", "cargo doc"]
+
+# Every assertion about the dependency layer and the check, clippy and doc
+# lanes. Each group is bound before the lists are joined: an error raised in
+# an operand of `+` would have `evaluating left side: ` before its message.
+let devBuild(run: DevRun!): [String!]! {
+  let dependencies = devBuildDependencies(run)
+  let clippy = devBuildClippy(run)
+  let check = devBuildCheck(run)
+  let doc = devBuildDoc(run)
+  let stale = devBuildStale(run)
+  let signal = devBuildSignal(run)
+  let layouts = devBuildLayouts(run)
+  dependencies + clippy + check + doc + stale + signal + layouts
+}
+
+# Checks that the clippy check of a package reaches its lane: that the shared
+# step runs for `package`, and not for `excluded`, which the clippy setting
+# leaves out.
+let devBuildReachesClippy(
+  workspace: Container!,
+  run: DevRun!,
+  args: [String!]!,
+  package: String!,
+  excluded: String!,
+): Void {
+  let check = "dagger " + args.join(" ")
+  let command = devBuildOnly(check, devTraced(workspace, run, args), "cargo clippy")
+  if (command.contains("-p " + package + " ") == false or command.contains(excluded)) {
+    raise devCheckFailed(
+      check,
+      "ran `" + command + "`, which must name " + package + " and not " + excluded,
+    )
+  }
+  null
+}
+
+# The multi-member fixture, which has a registry dependency: what the
+# dependency layer holds, that the lanes take their dependencies from it, and
+# what each kind of edit runs again.
+let devBuildDependencies(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "members", "")
+
+  devStdout(workspace, run, devBuildChecks)
+  passed += [
+    devHeld(
+      "members: the check, clippy and doc checks pass, for the workspace and for each of "
+        + "its three packages",
+    ),
+  ]
+
+  let compiled = devWorkspaceCall(
+    ".",
+    ["check-dependencies", "directory", "--path", devBuildTarget, "glob", "--pattern", "**/*.rmeta"],
+  )
+  devBuildDependenciesOnly(
+    "the dependency layer",
+    devStdout(workspace, run, compiled),
+    "debug/deps/libcfg_if-",
+  )
+  let overSource = devWorkspaceCall(
+    ".",
+    [
+      "check-dependencies",
+      "with-mounted-directory",
+      "--path",
+      "/src/members",
+      "--source",
+      ".",
+      "with-exec",
+      "--args",
+      "cargo,check,--workspace,--all-targets,--locked,--verbose",
+      "stderr",
+    ],
+  )
+  let log = devStdout(workspace, run, overSource)
+  let fresh = "cargo check over the source, from the dependency layer"
+  devSays(fresh, log, "Fresh cfg-if ")
+  devSays(fresh, log, "Checking members-core ")
+  passed += [
+    devHeld(
+      "members: the dependency layer holds the registry dependency cfg-if compiled and "
+        + "nothing of the members; over the source, Cargo finds cfg-if fresh there and "
+        + "compiles the members",
+    ),
+  ]
+
+  devAllCached(
+    "a second run of the check, clippy and doc lanes",
+    devTraced(workspace, run, devBuildChecks),
+    16,
+  )
+  passed += [
+    devHeld(
+      "members: a second run over unchanged inputs re-executes no step of the dependency "
+        + "layer and no lane",
+    ),
+  ]
+
+  let edited = workspace.withExec(
+    ["sed", "-i", "$ a // " + run.next, "/members/crates/core/src/lib.rs"],
+  )
+  let afterEdit = devTraced(edited, run, devBuildChecks)
+  let editCheck = "the dependency layer after a source edit"
+  devStateOf(editCheck, afterEdit, "cargo chef prepare", "CACHED")
+  devEach(devBuildLayer) { command =>
+    devStateOf(editCheck, afterEdit, command, "CACHED")
+  }
+  devEach(devBuildCommands) { command =>
+    devStateOf("the lanes after a source edit", afterEdit, command, "DONE")
+  }
+  passed += [
+    devHeld(
+      "members: after a source edit, cargo check, cargo clippy and cargo doc run again over "
+        + "the source, and no step of the dependency layer does",
+    ),
+  ]
+
+  # A release bump: the member's version, in its manifest and in the lockfile.
+  let version = "0.2.0-" + run.next
+  let bumped = edited
+    .withExec([
+      "sed",
+      "-i",
+      "s/^version = \"0.1.0\"$/version = \"" + version + "\"/",
+      "/members/crates/core/Cargo.toml",
+    ])
+    .withExec([
+      "sed",
+      "-i",
+      "/^name = \"members-core\"$/{n;s/^version = .*$/version = \"" + version + "\"/}",
+      "/members/Cargo.lock",
+    ])
+  let afterBump = devTraced(bumped, run, devBuildChecks)
+  let bumpCheck = "the dependency layer after a release bump"
+  devStateOf(bumpCheck, afterBump, "cargo chef prepare", "DONE")
+  devEach(devBuildLayer) { command =>
+    devStateOf(bumpCheck, afterBump, command, "CACHED")
+  }
+  devEach(devBuildCommands) { command =>
+    devStateOf("the lanes after a release bump", afterBump, command, "DONE")
+  }
+  passed += [
+    devHeld(
+      "members: after a member's version changes in its manifest and in Cargo.lock, the "
+        + "recipe is written again and comes out the same: the fetch, the dependencies' cargo "
+        + "check and cargo clean stay cached, and the lanes run and pass",
+    ),
+  ]
+
+  # A feature of a member is part of the recipe.
+  let featured = bumped
+    .withExec(["sed", "-i", "$ a [features]", "/members/crates/app/Cargo.toml"])
+    .withExec(["sed", "-i", "$ a acceptance-" + run.next + " = []", "/members/crates/app/Cargo.toml"])
+  let afterFeature = devTraced(featured, run, devBuildChecks)
+  devEach(devBuildLayer) { command =>
+    devStateOf(
+      "the dependency layer after a manifest gains a feature",
+      afterFeature,
+      command,
+      "DONE",
+    )
+  }
+  passed += [
+    devHeld(
+      "members: after a manifest gains a feature, the recipe differs: the fetch and the "
+        + "dependency layer run again",
+    ),
+  ]
+
+  let cross = devConfigured(
+    workspace,
+    run,
+    "members",
+    "target = \"wasm32-unknown-unknown\"\nbuildProfile = \"release\"\n",
+  )
+  devStdout(cross, run, devBuildChecks)
+  devBuildDependenciesOnly(
+    "the dependency layer under target and buildProfile",
+    devStdout(cross, run, compiled),
+    "wasm32-unknown-unknown/release/deps/libcfg_if-",
+  )
+  passed += [
+    devHeld(
+      "members: under target and buildProfile the three lanes pass, and the dependency "
+        + "layer holds cfg-if compiled for that target and profile and nothing of the members",
+    ),
+  ]
+
+  let unlocked = devConfigured(
+    workspace.withoutFile("/members/Cargo.lock"),
+    run,
+    "members",
+    "locked = false\n",
+  )
+  devStdout(unlocked, run, devBuildChecks)
+  passed += [
+    devHeld(
+      "members: with locked off and no Cargo.lock, the three lanes pass on the lockfile "
+        + "the fetch resolved",
+    ),
+  ]
+
+  # An image that cannot be pulled shows that base is used in its place.
+  let based = devConfigured(
+    workspace,
+    run,
+    "members",
+    "base = \"" + devToolsImage + "\"\nimage = \"registry.invalid/none:0\"\n",
+  )
+  devStdout(based, run, devBuildChecks)
+  passed += [
+    devHeld(
+      "members: under base the three lanes pass without pulling the image: cargo-chef is "
+        + "unpacked and run in that container",
+    ),
+  ]
+
+  let unknown = devConfigured(workspace, run, "members", "features = [\"absent\"]\n")
+  let output = devFailing(unknown, run, ["check", "--check=doc"])
+  let absent = "dagger check --check=doc under a feature no package has"
+  devSays(absent, output, "cargo check --workspace --all-targets --locked --features absent")
+  devSays(absent, output, "none of the selected packages contains this feature: absent")
+  devSilent(absent, output, "cargo doc")
+  passed += [
+    devHeld(
+      "members: when cargo check fails over the recipe, here for a feature no package has, "
+        + "a lane fails at that step of the dependency layer, with Cargo's message, and does "
+        + "not run its own command",
+    ),
+  ]
+  passed
+}
+
+# The workspace whose members differ in what clippy says of them: each
+# package's share of the shared step, narrowed selections, and the clippy
+# settings.
+let devBuildClippy(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "build-lints", "")
+  let all = ["check", "--check=clippy"]
+  let check = "dagger check --check=clippy over build-lints"
+
+  let output = devFailing(workspace, run, all)
+  devSays(check, output, "rust: clippy failed in faulty:")
+  devSays(check, output, "equal expressions as operands to `==`")
+  devSays(check, output, "rust: clippy failed in blocked:")
+  devSays(check, output, "not checked: blocked by lints-faulty")
+  devSilent(check, output, "clippy failed in clean")
+  devSilent(check, output, "clippy failed in untidy")
+  let command = devBuildOnly(check, devBuildTracedAny(workspace, run, all), "cargo clippy")
+  let expected = "cargo clippy --quiet --workspace --all-targets --keep-going "
+    + "--message-format=json --locked -- --no-deps"
+  if (command.hasPrefix(expected) == false) {
+    raise devCheckFailed(check, "ran `" + command + "`, not `" + expected + "`")
+  }
+  passed += [
+    devHeld(
+      "build-lints: one `" + expected + "` runs for the four packages; faulty fails with "
+        + "clippy's error, blocked is \"not checked: blocked by lints-faulty\", and clean and "
+        + "untidy, which has a warning, pass",
+    ),
+  ]
+
+  let clean = ["check", "--check=clippy", "--rust-package=clean"]
+  let alone = devBuildOnly(
+    "dagger check --rust-package=clean",
+    devTraced(workspace, run, clean),
+    "cargo clippy",
+  )
+  if (alone.contains(" -p lints-clean --all-targets ") == false) {
+    raise devCheckFailed(
+      "dagger check --rust-package=clean",
+      "ran `" + alone + "`, which must name lints-clean alone",
+    )
+  }
+  let blocked = ["check", "--check=clippy", "--rust-package=blocked"]
+  devStdout(workspace, run, blocked)
+  passed += [
+    devHeld(
+      "build-lints: --rust-package=clean runs cargo clippy -p lints-clean alone, and "
+        + "--rust-package=blocked passes, since faulty is then compiled and not linted",
+    ),
+  ]
+
+  let broken = workspace.withExec(
+    ["sed", "-i", "s/value == value/value == \"value\"/", "/build-lints/faulty/src/lib.rs"],
+  )
+  let uncompiled = devFailing(broken, run, blocked)
+  let brokenCheck = "dagger check --rust-package=blocked over a faulty that does not compile"
+  devSays(brokenCheck, uncompiled, "rust: clippy failed in blocked:")
+  devSays(brokenCheck, uncompiled, "not checked: blocked by lints-faulty")
+  passed += [
+    devHeld(
+      "build-lints: when faulty does not compile, --rust-package=blocked is \"not checked: "
+        + "blocked by lints-faulty\"",
+    ),
+  ]
+
+  # An error in a member's tests alone: its library compiles, so nothing is
+  # blocked.
+  let tested = workspace
+    .withExec(["sed", "-i", "s/value == value/value == 2/", "/build-lints/faulty/src/lib.rs"])
+    .withExec([
+      "sed",
+      "-i",
+      "$ a #[cfg(test)] fn broken() -> u32 { \"no number\" }",
+      "/build-lints/faulty/src/lib.rs",
+    ])
+  let untested = devFailing(tested, run, all)
+  let testedCheck = "dagger check --check=clippy over a faulty whose tests do not compile"
+  devSays(testedCheck, untested, "rust: clippy failed in faulty:")
+  devSays(testedCheck, untested, "mismatched types")
+  devSilent(testedCheck, untested, "clippy failed in blocked")
+  passed += [
+    devHeld(
+      "build-lints: when only the tests of faulty do not compile, faulty fails and blocked, "
+        + "which needs its library, passes",
+    ),
+  ]
+
+  let denying = devConfigured(
+    workspace,
+    run,
+    "build-lints",
+    "clippyArgs = [\"-D\", \"warnings\"]\n",
+  )
+  let denied = devFailing(denying, run, all)
+  let deniedCheck = "dagger check --check=clippy under clippyArgs"
+  devSays(deniedCheck, denied, "rust: clippy failed in untidy:")
+  devSays(deniedCheck, denied, "unneeded `return` statement")
+  devSilent(deniedCheck, denied, "clippy failed in clean")
+  # The engine answers a package check that passed before, over the same
+  # files and the whole selection, without calling the module. A file it has
+  # not seen makes it call.
+  let unseen = workspace.withNewFile("/build-lints/clean/src/unseen.rs", "// " + run.next + "\n")
+  let without = devConfigured(unseen, run, "build-lints", "clippy = [\"**\", \"!faulty\"]\n")
+  let named = devBuildOnly(
+    "dagger check under clippy",
+    devTraced(without, run, all),
+    "cargo clippy",
+  )
+  if (named.contains(" -p lints-blocked -p lints-clean -p lints-untidy --all-targets ") == false) {
+    raise devCheckFailed(
+      "dagger check --check=clippy under clippy = [\"**\", \"!faulty\"]",
+      "ran `" + named + "`, which must name blocked, clean and untidy",
+    )
+  }
+  passed += [
+    devHeld(
+      "build-lints: under clippyArgs = [\"-D\", \"warnings\"] untidy fails with its warning; "
+        + "under clippy = [\"**\", \"!faulty\"] clippy names the other three packages, and all "
+        + "four checks pass",
+    ),
+  ]
+
+  devStdout(workspace, run, ["check", "--check=check", "--check=doc"])
+  passed += [
+    devHeld(
+      "build-lints: the check and doc checks pass: what clippy reports there is no "
+        + "compile error",
+    ),
+  ]
+  passed
+}
+
+# The package that compiles only with its default feature: the feature sets
+# the check lane runs, and which of them the settings leave to clippy.
+let devBuildCheck(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "build-features", "")
+  let lane = ["check", "--check=check"]
+  let check = "dagger check --check=check over build-features"
+
+  let output = devFailing(workspace, run, lane)
+  devSays(check, output, "rust: cargo check --no-default-features failed in .:")
+  devSays(check, output, "build-features needs its std feature")
+  devSilent(check, output, "cargo check --all-features failed")
+  let ran = devBuildRan(devBuildTracedAny(workspace, run, lane), "cargo check --quiet")
+  let expected = [
+    "cargo check --quiet --workspace --locked --no-default-features",
+    "cargo check --quiet --workspace --locked --all-features",
+  ]
+  if (ran != expected) {
+    raise devCheckFailed(
+      check,
+      "ran " + devQuotedList(ran) + ", not " + devQuotedList(expected),
+    )
+  }
+  devStdout(workspace, run, ["check", "--check=clippy", "--check=doc"])
+  passed += [
+    devHeld(
+      "build-features: the check lane runs cargo check --workspace under "
+        + "--no-default-features and under --all-features; the first fails with the package's "
+        + "compile error, the second passes, and clippy and doc, under the default features, pass",
+    ),
+  ]
+
+  # Under noDefaultFeatures clippy is at that end of the feature space, and
+  # finds the error. The check lane is left with --all-features, which
+  # compiles.
+  let bare = devConfigured(workspace, run, "build-features", "noDefaultFeatures = true\n")
+  let left = devBuildRan(devTraced(bare, run, lane), "cargo check --quiet")
+  let remaining = ["cargo check --quiet --workspace --locked --all-features"]
+  if (left != remaining) {
+    raise devCheckFailed(
+      "dagger check --check=check under noDefaultFeatures",
+      "ran " + devQuotedList(left) + ", not " + devQuotedList(remaining),
+    )
+  }
+  let linted = devFailing(bare, run, ["check", "--check=clippy"])
+  let bareCheck = "dagger check --check=clippy under noDefaultFeatures"
+  devSays(bareCheck, linted, "rust: clippy failed in .:")
+  devSays(bareCheck, linted, "build-features needs its std feature")
+  passed += [
+    devHeld(
+      "build-features: under noDefaultFeatures = true clippy runs without the default "
+        + "feature and fails with the compile error, and the check lane runs --all-features "
+        + "alone and passes",
+    ),
+  ]
+  passed
+}
+
+# The package whose documentation has a broken link.
+let devBuildDoc(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "build-docs", "")
+  let check = "dagger check --check=doc over build-docs"
+  let output = devFailing(workspace, run, ["check", "--check=doc"])
+  devSays(check, output, "rust: cargo doc failed in .:")
+  devSays(check, output, "unresolved link to `halve`")
+  devStdout(workspace, run, ["check", "--check=check", "--check=clippy"])
+  [
+    devHeld(
+      "build-docs: the doc check fails with rustdoc's warning, \"unresolved link to "
+        + "`halve`\", and the check and clippy checks pass",
+    ),
+  ]
+}
+
+# The package that Cargo cannot tell from its stub in the dependency layer,
+# with source older than any layer. Its checks fail only if the layer removed
+# what it compiled of the stub.
+let devBuildStale(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "build-stale", "").withExec(
+    [
+      "touch",
+      "--date=2001-01-01",
+      "/build-stale/Cargo.toml",
+      "/build-stale/Cargo.lock",
+      "/build-stale/src/lib.rs",
+    ],
+  )
+  # The hazard itself: with the stub compiled again and left in place, Cargo
+  # takes the package for the stub, and passes.
+  let left = devWorkspaceCall(
+    ".",
+    [
+      "check-dependencies",
+      "with-exec",
+      "--args",
+      "cargo,check,--workspace,--locked",
+      "with-mounted-directory",
+      "--path",
+      "/src/build-stale",
+      "--source",
+      ".",
+      "with-exec",
+      "--args",
+      "cargo,check,--workspace,--locked,--verbose",
+      "stderr",
+    ],
+  )
+  devSays(
+    "cargo check over build-stale with its stub's artifact in place",
+    devStdout(workspace, run, left),
+    "Fresh build-stale ",
+  )
+  let check = "dagger check over build-stale"
+  let output = devFailing(workspace, run, ["check", "--check=check", "--check=clippy"])
+  devSays(check, output, "rust: cargo check --no-default-features failed in .:")
+  devSays(check, output, "rust: clippy failed in .:")
+  devSays(check, output, "cannot add `&str` to `u64`")
+  [
+    devHeld(
+      "build-stale: a package with the manifest and version of its stub in the dependency "
+        + "layer, and source older than the layer, fails check and clippy with its compile "
+        + "error; with the stub's artifact left in the target directory, Cargo calls the "
+        + "package fresh and does not compile it",
+    ),
+  ]
+}
+
+# The package whose build script a signal stops, as the kernel stops a
+# compiler that runs out of memory: a failure the engine must not keep.
+let devBuildSignal(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "build-signal", "")
+  let lane = ["check", "--check=doc"]
+  let check = "dagger check --check=doc over build-signal"
+  let output = devFailing(workspace, run, lane)
+  devSays(check, output, "cargo doc --quiet --workspace --no-deps --locked")
+  devSays(check, output, "(signal: 6, SIGABRT: process abort signal)")
+  let execs = devBuildTracedAny(workspace, run, lane)
+  let states = execs.filter { exec => exec.command.hasPrefix("cargo doc") }.map { exec =>
+    exec.state
+  }
+  if (states != ["CACHED", "ERROR"]) {
+    raise devCheckFailed(
+      "a second run of the doc lane over build-signal",
+      "expected the first cargo doc CACHED and a second one to run and fail, but traced\n"
+        + devDescribed(execs),
+    )
+  }
+  [
+    devHeld(
+      "build-signal: when a signal stops a process of the build, the lane runs its command "
+        + "once more and fails with Cargo's message; the engine does not keep that failure, "
+        + "so the next run tries again",
+    ),
+  ]
+}
+
+# The lanes over the other layouts: a single package, workspaces below the
+# repository root, a workspace in a directory of another, every kind of Cargo
+# target, and a path dependency outside the root.
+let devBuildLayouts(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  devEach(["single", "pair", "nested"]) { fixture =>
+    devStdout(devConsumer(run, fixture, ""), run, devBuildChecks)
+  }
+  passed += [
+    devHeld(
+      "single, pair, nested: the check, clippy and doc checks pass for a single package, "
+        + "for two workspaces below the repository root, and for a workspace in a directory of "
+        + "another",
+    ),
+  ]
+
+  devStdout(
+    devConsumer(run, "build-kinds", "clippyArgs = [\"-D\", \"warnings\"]\n"),
+    run,
+    devBuildChecks,
+  )
+  passed += [
+    devHeld(
+      "build-kinds: a workspace with a procedural macro, a build script, a binary, an "
+        + "example, an integration test and a benchmark without the test harness passes the "
+        + "three checks, with warnings denied: each kind of target has a stub that compiles",
+    ),
+  ]
+
+  let workspace = devConsumer(run, "build-outside", "includeExtraFiles = [\"shared/**\"]\n")
+  devStdout(workspace, run, devBuildChecks)
+  let compiled = devWorkspaceCall(
+    "app",
+    [
+      "check-dependencies",
+      "directory",
+      "--path",
+      devBuildTarget,
+      "glob",
+      "--pattern",
+      "**/*outside*",
+    ],
+  )
+  let found = devStdout(workspace, run, compiled)
+  if (found.trimSpace != "") {
+    raise devCheckFailed(
+      "the dependency layer of build-outside",
+      "holds " + devQuoted(found) + ", compiled of packages taken from a path",
+    )
+  }
+  passed += [
+    devHeld(
+      "build-outside: a workspace that depends by path on a package outside its root, which "
+        + "has a build script, passes the three checks; the dependency layer keeps nothing "
+        + "compiled of either package",
+    ),
+  ]
+  passed
+}
+
+# Checks that a listing of the dependency layer's compiled files has the
+# dependency `expected` and nothing of the members fixture's own packages.
+let devBuildDependenciesOnly(check: String!, found: String!, expected: String!): Void {
+  let files = devLines(found)
+  if (files.any { file => file.contains(expected) } == false
+    or files.any { file => file.contains("members") }) {
+    raise devCheckFailed(
+      check,
+      "holds " + devQuoted(found) + ": " + expected + " must be there, and no file of a member",
+    )
+  }
+  null
+}
+
+# The traced commands that start with `command`, without the options of their
+# step.
+let devBuildRan(execs: [DevExec!]!, command: String!): [String!]! {
+  execs.filter { exec => exec.command.hasPrefix(command) }.map { exec =>
+    # The trace ends a command with its step's options, in one of two forms.
+    exec.command.split("\"]").takeFirst(1).join("").split(" (").takeFirst(1).join("")
+  }
+}
+
+# The one traced command that starts with `command`, with a space after it.
+let devBuildOnly(check: String!, execs: [DevExec!]!, command: String!): String! {
+  let ran = devBuildRan(execs, command)
+  if (ran.length != 1) {
+    raise devCheckFailed(
+      check,
+      "expected one `" + command + "`, but traced\n" + devDescribed(execs),
+    )
+  }
+  ran[0]! + " "
+}
+
+# Runs `dagger <args>` with its full trace, whether it fails or not, and
+# returns the container commands of the module's steps.
+let devBuildTracedAny(workspace: Container!, run: DevRun!, args: [String!]!): [DevExec!]! {
+  let trace = devDagger(workspace, run, ["--progress=plain", "-vvv"] + args, ANY).stderr rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  devExecs(trace)
+}

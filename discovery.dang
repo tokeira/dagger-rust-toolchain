@@ -1,0 +1,210 @@
+# Discovery: which directories are Cargo workspaces, and which packages each
+# holds. Both come from Cargo itself, through `cargo metadata --no-deps`, so
+# Cargo's rules for member globs, `exclude` and nested packages apply.
+#
+# Cargo reads manifests, and looks for the files that make targets
+# (src/lib.rs, src/main.rs, tests/*.rs, ...) without reading them. Discovery
+# therefore runs over a skeleton: the real manifests, and an empty file in
+# place of each target file. The skeleton is keyed on the manifests and on
+# the set of target paths, so editing a source file never reruns discovery.
+#
+# rustWorkspaceName, rustSynthetic, rustMountPath and rustRootsHere are
+# adapted from go.dang in dagger.io/go (https://github.com/dagger/go),
+# Copyright 2022 Dagger, Inc., licensed under the Apache License, Version
+# 2.0, and changed for Cargo workspaces. See NOTICE.
+
+# Where Cargo looks for a package's targets, relative to the package.
+let rustTargetPatterns: [String!]! = [
+  "**/build.rs",
+  "**/src/lib.rs",
+  "**/src/main.rs",
+  "**/src/bin/*.rs",
+  "**/src/bin/*/main.rs",
+  "**/examples/*.rs",
+  "**/examples/*/main.rs",
+  "**/tests/*.rs",
+  "**/tests/*/main.rs",
+  "**/benches/*.rs",
+  "**/benches/*/main.rs",
+]
+
+# The files Cargo reads to load a workspace, besides its lockfile.
+let rustManifestPatterns: [String!]! = [
+  "**/Cargo.toml",
+  "**/.cargo/config.toml",
+  "**/.cargo/config",
+]
+
+# Last segment of the workspace root address, usually the repository name, as
+# dagger.io/go derives it.
+let rustWorkspaceName(ws: Workspace!): String! {
+  let cwd = ws.cwd.trimSuffix("/")
+  let location = ws.address.replaceMatches(`@[^/:@]*$`, with: "").trimSuffix("/")
+  let root = if (cwd != "" and location.hasSuffix(cwd)) {
+    location.trimSuffix(cwd)
+  } else {
+    location
+  }
+  root
+    .split("/")
+    .filter { segment => segment != "" }
+    .takeLast(1)
+    .join("")
+    .trimSuffix(".git")
+}
+
+# Whether a workspace was made from a directory or git ref with asWorkspace.
+# Its address is its content digest or commit, which changes with every edit.
+let rustSynthetic(ws: Workspace!): Boolean! {
+  ws.address.hasPrefix("directory://") or ws.address.hasPrefix("git-ref://")
+}
+
+# Container path where the workspace is mounted for Cargo commands: the
+# mountPath setting, or "/src/<workspace name>", or "/src" for a synthetic
+# workspace. A fixed path keeps compiled outputs identical across engines.
+let rustMountPath(tool: Rust!, ws: Workspace!): String! {
+  let derived = if (rustSynthetic(ws)) { "/src" } else { "/src/" + rustWorkspaceName(ws) }
+  tool.mountPath ?? derived
+}
+
+# The default prefix of the cache volumes: the workspace name.
+let rustDefaultVolumePrefix(ws: Workspace!): String! {
+  if (rustSynthetic(ws)) { "rust" } else { rustWorkspaceName(ws) }
+}
+
+# Every manifest in the repository, for discovery. No lockfile, no toolchain
+# file: discovery runs with the image's own Cargo, and `--no-deps` resolves
+# nothing.
+let rustDiscoveryManifests(ws: Workspace!): Directory! {
+  ws.directory("/", include: rustManifestPatterns, gitignore: true)
+}
+
+# Workspace paths of the files that make Cargo targets, in a view of the
+# repository.
+let rustTargetFiles(view: Directory!): [String!]! {
+  view.glob("**/*.rs").filter { file => file.hasSuffix("/") == false }
+}
+
+# Manifests with an empty file for each target path: what Cargo needs to load
+# a workspace, without the contents of any source file.
+let rustSkeleton(root: Container!, manifests: Directory!, targets: [String!]!): Directory! {
+  let dirs = targets.map { file => rustParent(file) }.filter { dir => dir != "." }.uniq
+  root
+    .withDirectory("/skeleton", manifests)
+    .withNewFile("/tmp/rust-skeleton/dirs", rustLines(dirs))
+    .withNewFile("/tmp/rust-skeleton/files", rustLines(targets))
+    .withWorkdir("/skeleton")
+    .withExec(["xargs", "-r", "-d", "\n", "-a", "/tmp/rust-skeleton/dirs", "mkdir", "-p", "--"])
+    .withExec(["xargs", "-r", "-d", "\n", "-a", "/tmp/rust-skeleton/files", "touch", "--"])
+    .directory("/skeleton")
+}
+
+# What `cargo metadata --no-deps` says of the workspace that holds a
+# directory: its root, and its member packages.
+let rustMetadata(tool: Rust!, skeleton: Directory!, at: String!): {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!}}!]!}}! {
+  let ran = rustImage(tool)
+    .withMountedDirectory("/skeleton", skeleton)
+    .withWorkdir(rustPathIn("/skeleton", at))
+    .withExec(["cargo", "metadata", "--no-deps", "--format-version", "1"], expect: ANY)
+  if (ran.exitCode != 0) {
+    raise "rust: cargo metadata failed in " + at + ":\n" + ran.stderr
+  }
+  JSON.decode(ran.stdout) :: {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!}}!]!}}!
+}
+
+# Directories that may be workspace roots: those holding a Cargo.toml with a
+# [workspace] table, or a Cargo.toml and a Cargo.lock.
+let rustCandidates(ws: Workspace!): [String!]! {
+  let manifests = rustDiscoveryManifests(ws)
+  let packages = manifests
+    .glob("**/Cargo.toml")
+    .filter { file => file.hasSuffix("/") == false }
+    .map { file => rustParent(file) }
+  let declared = manifests
+    .search(pattern: `^\s*\[\s*workspace\s*[\].]`, filesOnly: true).{{filePath}}
+    .map { found => found.filePath }
+    .filter { file => file == "Cargo.toml" or file.hasSuffix("/Cargo.toml") }
+    .map { file => rustParent(file) }
+  let locked = ws
+    .directory("/", include: ["**/Cargo.lock"], gitignore: true)
+    .glob("**/Cargo.lock")
+    .filter { file => file.hasSuffix("/") == false }
+    .map { file => rustParent(file) }
+  rustSorted(
+    packages.filter { dir => declared.contains(dir) or locked.contains(dir) },
+  )
+}
+
+# What one pass over the repository finds: every target path, the skeleton
+# of the whole repository, and the workspace roots in byte order.
+type RustDiscovery {
+  let targets: [String!]!
+  let skeleton: Directory!
+  let roots: [String!]!
+}
+
+# The candidates that the workspaceRoots setting selects, by the rules of the
+# test and clippy settings: a pattern selects its directory and everything
+# below it, and an exclusion wins.
+let rustConsidered(tool: Rust!, candidates: [String!]!): [String!]! {
+  candidates.filter { dir => rustSelects(tool.workspaceRoots, dir) }
+}
+
+# Workspace roots are the candidates that Cargo names as the root of their
+# own workspace. A member that keeps a stray Cargo.lock is not one.
+#
+# The workspaceRoots setting narrows the candidates first, so Cargo never
+# loads a root that the setting leaves out: a project that Cargo cannot load
+# then fails nothing. The setting decides which roots are workspaces, not
+# which packages a workspace has: a member below a directory that the setting
+# leaves out still belongs to its workspace, because Cargo says so.
+let rustDiscover(tool: Rust!, ws: Workspace!): RustDiscovery! {
+  let targets = rustTargetFiles(
+    ws.directory("/", include: rustTargetPatterns, gitignore: true),
+  )
+  let skeleton = rustSkeleton(rustImage(tool), rustDiscoveryManifests(ws), targets)
+  RustDiscovery(
+    targets: targets,
+    skeleton: skeleton,
+    roots: rustConsidered(tool, rustCandidates(ws)).filter { dir =>
+      rustMetadata(tool, skeleton, dir).workspace_root == rustPathIn(
+        "/skeleton",
+        dir,
+      )
+    },
+  )
+}
+
+# The roots at or below the working directory, and the nearest one that
+# holds it, as dagger.io/go scopes its modules.
+let rustRootsHere(ws: Workspace!, roots: [String!]!): [String!]! {
+  let cwd = ws.cwd.trimPrefix("/").trimSuffix("/")
+  if (cwd == "" or cwd == ".") {
+    roots
+  } else {
+    let below = roots.filter { root => root == cwd or root.hasPrefix(cwd + "/") }
+    let enclosing = roots
+      .filter { root => rustUnder(cwd, root) }
+      .reduce("") { inner, root =>
+        if (inner == "" or rustDepth(root) > rustDepth(inner)) { root } else { inner }
+      }
+    if (enclosing == "") { below } else { ([enclosing] + below).uniq }
+  }
+}
+
+# The member packages of the workspace at a root: each one's directory
+# relative to the repository root, and its name, in byte order of directory.
+let rustMembers(tool: Rust!, found: RustDiscovery!, root: String!): [RustMember!]! {
+  let metadata = rustMetadata(tool, found.skeleton, root)
+  if (metadata.workspace_root != rustPathIn("/skeleton", root)) {
+    raise "rust: " + root + " is not a Cargo workspace root: Cargo finds its workspace at "
+      + metadata.workspace_root.trimPrefix("/skeleton").trimPrefix("/")
+  }
+  let members = metadata.packages.map { pkg =>
+    let dir = pkg.manifest_path.trimPrefix("/skeleton/").trimSuffix("Cargo.toml").trimSuffix("/")
+    RustMember(path: if (dir == "") { "." } else { dir }, name: pkg.name)
+  }
+  rustSorted(members.map { member => member.path }).map { path =>
+    members.filter { member => member.path == path }[0]!
+  }
+}

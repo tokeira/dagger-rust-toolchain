@@ -1,0 +1,863 @@
+# The acceptance of the compile lanes' cache volumes: which volumes each lane
+# mounts, what a lane compiles over empty volumes and over warm ones, and that
+# every verdict is the same either way.
+#
+# Each run of the check gives the module a `volumePrefix` of its own, so its
+# volumes start empty whatever the engine holds, and are warm only with what
+# this run did.
+#
+# What a lane's step did is read from results, not from log lines: the
+# helper's report, a file of the step that `RustWorkspace.compiled` returns,
+# and the verdict of each check.
+
+# The fixture the assertions run over, its packages, and where it is mounted.
+let devCacheSuite: String! = "test-suite"
+
+let devCacheMembers: [String!]! = ["suite-base", "suite-lone", "suite-mid", "suite-tool"]
+
+let devCacheMount: String! = "/src/test-suite"
+
+# The packages whose metadata rustdoc needs, which rustc compiles for the doc
+# lane: those that another member depends on.
+let devCacheNeeded: [String!]! = ["suite-base", "suite-mid"]
+
+# The compile lanes, each with its target directory and the start of its Cargo
+# commands.
+let devCacheLanes: [{{lane: String!, target: String!, command: String!}}!]! = [
+  {{lane: "check", target: devBuildTarget, command: "cargo check --quiet"}},
+  {{lane: "clippy", target: devBuildTarget, command: "cargo clippy"}},
+  {{lane: "doc", target: devBuildTarget, command: "cargo doc"}},
+  {{lane: "test", target: devTestTarget, command: "cargo nextest list"}},
+]
+
+# `dagger check` for the four compile lanes at once.
+let devCacheChecks: [String!]! = [
+  "check",
+  "--check=check",
+  "--check=clippy",
+  "--check=doc",
+  "--check=test",
+]
+
+# Where a lane's step keeps the helper's report, and what the test build keeps
+# for the runs.
+let devCacheReportPath: String! = "/var/cache/rust/report"
+
+let devCacheKept: String! = "/var/cache/rust/kept"
+
+# Every assertion about the compile lanes' volumes.
+let devCache(run: DevRun!): [String!]! {
+  let passed = devCacheHelper(run)
+  let key = "volumes-" + run.next
+  let workspace = devConsumer(run, devCacheSuite, "volumePrefix = \"" + key + "\"\n")
+
+  # Empty volumes: every lane's first step.
+  devEach(devCacheLanes) { compile =>
+    let check = "the first step of the " + compile.lane + " lane"
+    let first = devCacheInspected(workspace, run, ".", compile.lane)
+    devCacheMounted(
+      check,
+      first.trace,
+      [
+        devCacheLocked(key + "-source-" + compile.lane, devCacheMount, false),
+        devCacheLocked(key + "-target-" + compile.lane, compile.target, true),
+      ],
+    )
+    devCacheUnderHelper(check, devExecs(first.trace), compile.command)
+    if (first.report.kept != 0 or first.report.wrote.contains("crates/mid/src/lib.rs") == false) {
+      raise devCheckFailed(
+        check,
+        "did not write every file to an empty mirror:\n" + devTail(first.report.text),
+      )
+    }
+    devCacheBuilt(check, first.report, compile.lane, devCacheMembers, devCacheNeeded)
+  }
+  passed += [
+    devHeld(
+      "test-suite: under volumePrefix = \"" + key + "\" each compile lane mounts two volumes "
+        + "of its own, both LOCKED: " + key + "-source-<lane> at the mount path, and " + key
+        + "-target-<lane> at its target directory, started from its dependency layer; each "
+        + "lane's Cargo command runs under the helper, in one step with the sync, and no step "
+        + "runs a shell; over empty volumes a lane writes every file to its mirror, compiles "
+        + "the four members, of which the doc lane compiles the two that others need and "
+        + "documents all four, and compiles no dependency",
+    ),
+  ]
+
+  # The default names, in a repository whose name no other check uses: the
+  # volumes are then this check's own.
+  let name = run.check + "-pair"
+  let pair = devRenamed(run, "pair", name)
+  let left = devCacheInspected(pair, run, "left", "doc")
+  devCacheMounted(
+    "the doc lane of the workspace left",
+    left.trace,
+    [
+      devCacheLocked(name + "-left-source-doc", "/src/" + name, false),
+      devCacheLocked(
+        name + "-left-target-doc",
+        "/var/cache/rust/target-check",
+        true,
+      ),
+    ],
+  )
+  passed += [
+    devHeld(
+      "pair: in a repository named " + name + ", without volumePrefix, the doc lane of the "
+        + "workspace left mounts " + name + "-left-source-doc and " + name
+        + "-left-target-doc: the volumes are named for the repository and the workspace's root",
+    ),
+  ]
+
+  # The test runs of the tree as it is, so that an edit can leave some of them
+  # cached.
+  let test = ["check", "--check=test"]
+  devStdout(workspace, run, test)
+  let untouched = ["**/suite_base-*", "**/suite_lone-*"]
+  devCacheSelects(workspace, run, untouched)
+  let before = devCacheBinaries(workspace, run, untouched)
+
+  # Warm volumes: an edit to one file of a package that one other package
+  # needs. It changes what the package's function returns, and so the binaries
+  # that link it.
+  let edited = workspace.withExec(
+    [
+      "sed",
+      "-i",
+      "s/\"{} on /\"" + run.next + " {} on /",
+      "/" + devCacheSuite + "/crates/mid/src/lib.rs",
+    ],
+  )
+  devEach(devCacheLanes) { compile =>
+    let check = "the " + compile.lane + " lane after an edit to crates/mid"
+    let report = devCacheReported(edited, run, compile.lane)
+    if (report.wrote != ["crates/mid/src/lib.rs"] or report.removed.length != 0) {
+      raise devCheckFailed(
+        check,
+        "did not write that one file to its mirror, and no other:\n" + devTail(report.text),
+      )
+    }
+    # Only the doc lane gives manifests a new time, and then all five.
+    let renewed = if (compile.lane == "doc") { 5 } else { 0 }
+    if (report.renewed.length != renewed) {
+      raise devCheckFailed(
+        check,
+        "did not give " + toString(renewed) + " manifests a new time:\n" + devTail(report.text),
+      )
+    }
+    devCacheBuilt(check, report, compile.lane, ["suite-mid", "suite-tool"], ["suite-mid"])
+  }
+  passed += [
+    devHeld(
+      "test-suite: over warm volumes, after an edit to one file of crates/mid, each compile "
+        + "lane writes that file alone to its mirror; check, clippy and the test build compile "
+        + "suite-mid and suite-tool, which needs it, and not suite-base, not suite-lone and no "
+        + "dependency; the doc lane compiles suite-mid alone, and documents all four members "
+        + "again, since it gives every manifest a new time",
+    ),
+  ]
+
+  let after = devCacheBinaries(edited, run, untouched)
+  let rebuilt = devCacheBinaries(
+    devConfigured(edited, run, devCacheSuite, "volumePrefix = \"volumes-" + run.next + "\"\n"),
+    run,
+    untouched,
+  )
+  if (before != after or after != rebuilt) {
+    raise devCheckFailed(
+      "the test binaries of crates/base and crates/lone",
+      "have the digest " + before + " before an edit to crates/mid, " + after
+        + " after it, and " + rebuilt + " when built in empty volumes",
+    )
+  }
+  let steps = devSteps(edited, run, test)
+  devEach([
+    {{package: "suite-base", state: "CACHED"}},
+    {{package: "suite-lone", state: "CACHED"}},
+    {{package: "suite-mid", state: "DONE"}},
+    {{package: "suite-tool", state: "DONE"}},
+  ]) { expected =>
+    devCacheRan(
+      "the test runs after an edit to crates/mid",
+      steps,
+      expected.package,
+      expected.state,
+    )
+  }
+  passed += [
+    devHeld(
+      "test-suite: after the edit to crates/mid the test binaries of crates/base and "
+        + "crates/lone are the same, byte for byte, as before it, and as a build in empty "
+        + "volumes makes them; their test runs are cached, and those of crates/mid and "
+        + "crates/tool run again",
+    ),
+  ]
+
+  # A manifest that gains a feature changes the dependency layer.
+  let featured = edited
+    .withExec(["sed", "-i", "$ a [features]", "/" + devCacheSuite + "/crates/lone/Cargo.toml"])
+    .withExec([
+      "sed",
+      "-i",
+      "$ a volumes-" + run.next + " = []",
+      "/" + devCacheSuite + "/crates/lone/Cargo.toml",
+    ])
+  devEach(devCacheLanes) { compile =>
+    devCacheBuilt(
+      "the " + compile.lane + " lane after a manifest gains a feature",
+      devCacheReported(featured, run, compile.lane),
+      compile.lane,
+      devCacheMembers,
+      devCacheNeeded,
+    )
+  }
+  passed += [
+    devHeld(
+      "test-suite: after a manifest gains a feature, the dependency layer differs and each "
+        + "lane's target volume starts again from the new layer: the lane compiles its members "
+        + "again as it does over empty volumes, and no dependency",
+    ),
+  ]
+
+  # A file that goes: a module with a failing test.
+  let module = "/" + devCacheSuite + "/crates/lone/src/extra.rs"
+  let library = "/" + devCacheSuite + "/crates/lone/src/lib.rs"
+  let added = edited
+    .withNewFile(module, "#[test]\nfn left_behind() {\n    panic!(\"left behind\");\n}\n")
+    .withExec(["sed", "-i", "$ a mod extra;", library])
+  let addedOutput = devCacheFailing(added, run, devCacheChecks)
+  let addedCheck = "the checks with a new module in crates/lone whose test fails"
+  devCacheSameVerdicts(addedCheck, addedOutput, devCacheVerdictsOf([], ["crates/lone"]))
+  devSays(addedCheck, addedOutput, "suite-lone extra::left_behind")
+
+  # The file alone goes: the code still declares the module.
+  let orphaned = added.withoutFile(module)
+  let orphanedOutput = devCacheFailing(orphaned, run, devCacheChecks)
+  let orphanedCheck = "the checks after the module's file is deleted and its declaration is not"
+  devCacheSameVerdicts(
+    orphanedCheck,
+    orphanedOutput,
+    devCacheVerdictsOf(
+      ["check", "doc", "clippy crates/lone"],
+      ["crates/base", "crates/lone", "crates/mid", "crates/tool"],
+    ),
+  )
+  devSays(orphanedCheck, orphanedOutput, "file not found for module `extra`")
+
+  # The declaration goes too. A value of this run takes its place, so that the
+  # tree is one the engine has not seen, and every check runs.
+  let removed = orphaned.withExec(
+    ["sed", "-i", "s/^mod extra;$/pub const WITHOUT: \\&str = \"" + run.next + "\";/", library],
+  )
+  devStdout(removed, run, devCacheChecks)
+  passed += [
+    devHeld(
+      "test-suite: a module added to crates/lone with a failing test fails that package's "
+        + "test check alone; when its file is deleted and its declaration is not, the file is "
+        + "gone from every lane's mirror: check, doc, the clippy check of crates/lone and every "
+        + "test check fail with \"file not found for module `extra`\"; when the declaration "
+        + "goes too, every check passes, and the deleted test no longer runs",
+    ),
+  ]
+
+  # A file outside a package, which the package's documentation includes.
+  let notes = "/" + devCacheSuite + "/NOTES.md"
+  let included = edited
+    .withNewFile(notes, "Notes of " + run.next + ".\n")
+    .withExec(["sed", "-i", "1i #![doc = include_str!(\"../../../NOTES.md\")]", library])
+  devStdout(included, run, devCacheChecks)
+  let linked = included.withNewFile(notes, "See [`absent`].\n")
+  let linkedOutput = devCacheFailing(linked, run, devCacheChecks)
+  let linkedCheck = "the checks after a file that documentation includes gains a broken link"
+  devCacheSameVerdicts(linkedCheck, linkedOutput, devCacheVerdictsOf(["doc"], []))
+  devSays(linkedCheck, linkedOutput, "unresolved link to `absent`")
+  passed += [
+    devHeld(
+      "test-suite: when the documentation of crates/lone includes a file outside the "
+        + "package, an edit to that file that breaks a link fails the doc check over warm "
+        + "volumes: rustdoc runs again for every member whenever the tree changed",
+    ),
+  ]
+
+  # An error, its correction, and the error again, over the warm volumes.
+  let failed = devCacheVerdictsOf(
+    ["check", "doc", "clippy crates/mid", "clippy crates/tool"],
+    ["crates/base", "crates/lone", "crates/mid", "crates/tool"],
+  )
+  let error = "$ a pub fn broken() -> u64 { \"no number\" }"
+  let middle = "/" + devCacheSuite + "/crates/mid/src/lib.rs"
+  let broken = edited.withExec(["sed", "-i", error, middle])
+  let brokenOutput = devCacheFailing(broken, run, devCacheChecks)
+  let brokenCheck = "the checks with a compile error in crates/mid"
+  devCacheSameVerdicts(brokenCheck, brokenOutput, failed)
+  devSays(brokenCheck, brokenOutput, "mismatched types")
+  devSays(brokenCheck, brokenOutput, "not checked: blocked by suite-mid")
+
+  let corrected = broken.withExec(
+    [
+      "sed",
+      "-i",
+      "s/^pub fn broken.*$/pub const CORRECTED: \\&str = \"" + run.next + "\";/",
+      middle,
+    ],
+  )
+  devStdout(corrected, run, devCacheChecks)
+
+  let again = corrected.withExec(["sed", "-i", error, middle])
+  let warm = devCacheFailing(again, run, devCacheChecks)
+  devCacheSameVerdicts(
+    "the checks with the compile error in crates/mid again",
+    warm,
+    failed,
+  )
+  passed += [
+    devHeld(
+      "test-suite: over warm volumes a compile error in crates/mid fails check, doc, the "
+        + "clippy checks of crates/mid and of crates/tool, which is \"not checked: blocked by "
+        + "suite-mid\", and every test check, and passes the clippy checks of crates/base and "
+        + "crates/lone; with the error corrected every check passes; with the error back the "
+        + "verdicts are those of the first time",
+    ),
+  ]
+
+  # The same two trees, each over volumes that start empty.
+  let coldOutput = devCacheFailing(
+    devConfigured(again, run, devCacheSuite, "volumePrefix = \"volumes-" + run.next + "\"\n"),
+    run,
+    devCacheChecks,
+  )
+  let coldCheck = "the checks with the compile error, over empty volumes"
+  devCacheSameVerdicts(coldCheck, coldOutput, failed)
+  if (devCacheVerdicts(coldOutput) != devCacheVerdicts(warm)) {
+    raise devCheckFailed(
+      coldCheck,
+      "gave other verdicts than over warm volumes:\n" + devCacheShown(devCacheVerdicts(coldOutput))
+        + "\nnot\n" + devCacheShown(devCacheVerdicts(warm)),
+    )
+  }
+  devStdout(
+    devConfigured(corrected, run, devCacheSuite, "volumePrefix = \"volumes-" + run.next + "\"\n"),
+    run,
+    devCacheChecks,
+  )
+  passed += [
+    devHeld(
+      "test-suite: over volumes that start empty, under a new volumePrefix, the tree with the "
+        + "compile error gets the verdicts it gets over warm volumes, check by check, and the "
+        + "corrected tree passes every check",
+    ),
+  ]
+
+  let linted = devCacheLinted(run)
+  let stale = devCacheStale(run)
+  passed + linted + stale
+}
+
+# The helper's own tests, run with the Cargo of the module's pinned image: the
+# sync, what is kept of a build, the report of what Cargo compiled, and the
+# JSON they read.
+let devCacheHelper(run: DevRun!): [String!]! {
+  let tests = run
+    .cli
+    .withWorkdir(devModulePath + "/helper")
+    .withEnvVariable("CARGO_TARGET_DIR", "/tmp/rust-lane-helper-tests")
+    .withExec(["cargo", "test", "--locked", "--offline"])
+  let output = tests.stdout rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  let results = devLines(output).filter { line => line.hasPrefix("test result: ") }
+  let result = results.takeFirst(1).join("")
+  let passed = devCacheCount(result, "passed")
+  let failures = devCacheCount(result, "failed")
+  if (result.hasPrefix("test result: ok.") == false or passed < 20 or failures != 0) {
+    raise devCheckFailed(
+      "the helper's tests",
+      "ended with " + devQuoted(result) + ":\n" + devTail(output),
+    )
+  }
+  [
+    devHeld(
+      "helper: its own " + toString(passed) + " tests pass: the sync keeps the time of a file "
+        + "whose content is the same, gives a new one to a file that differs and removes a file "
+        + "that is gone; the build's listed files are kept at their paths; the report names the "
+        + "packages Cargo compiled, in both layouts of a target directory",
+    ),
+  ]
+}
+
+# The number before the word `ending` in the test harness's result line, as
+# `20 passed; 0 failed;` gives them, or 0 when there is none.
+let devCacheCount(result: String!, ending: String!): Int! {
+  let words = result.splitMatches(`[ ;]`)
+  let count = 0
+  let found = false
+  words.each { word, index =>
+    if (found == false and index > 0 and word == ending) {
+      found = true
+      count = (JSON.decode(words[index - 1]!) :: Int!) rescue 0
+    }
+  }
+  count
+}
+
+# What clippy's verdicts depend on and Cargo does not track: the packages the
+# command names, and `clippy.toml`. A command that differs in either must not
+# find, in a warm volume, members that another command left unlinted or linted
+# otherwise.
+let devCacheLinted(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let clippy = ["check", "--check=clippy"]
+
+  # For the package blocked alone, faulty is compiled and not linted. Every
+  # package after that, over the same tree: faulty must be linted, and fail.
+  let lints = devConsumer(run, "build-lints", "volumePrefix = \"volumes-" + run.next + "\"\n")
+  devStdout(lints, run, ["check", "--check=clippy", "--rust-package=blocked"])
+  let lintsOutput = devCacheFailing(lints, run, clippy)
+  let lintsCheck = "the clippy checks of build-lints after those of the package blocked alone"
+  devCacheSameVerdicts(
+    lintsCheck,
+    lintsOutput,
+    devCacheLintVerdicts(["blocked", "faulty"], ["clean", "untidy"]),
+  )
+  devSays(lintsCheck, lintsOutput, "equal expressions as operands to `==`")
+  devSays(lintsCheck, lintsOutput, "not checked: blocked by lints-faulty")
+  passed += [
+    devHeld(
+      "build-lints: after the clippy check of the package blocked alone, which compiles "
+        + "faulty without linting it, the clippy checks of every package over the same tree "
+        + "lint faulty: it fails, and blocked is \"not checked: blocked by lints-faulty\"; a "
+        + "command that names other packages has a target volume of its own under the same name",
+    ),
+  ]
+
+  # A lint that clippy.toml configures, denied: no name is disallowed, then
+  # one is.
+  let suite = devConsumer(
+    run,
+    devCacheSuite,
+    "volumePrefix = \"volumes-" + run.next
+      + "\"\nclippyArgs = [\"-D\", \"clippy::disallowed_names\"]\n",
+  )
+  devStdout(suite, run, clippy)
+  let disallowing = suite.withNewFile(
+    "/" + devCacheSuite + "/clippy.toml",
+    "disallowed-names = [\"number\"]\n",
+  )
+  let suiteOutput = devCacheFailing(disallowing, run, clippy)
+  let suiteCheck = "the clippy checks after clippy.toml disallows a name"
+  devCacheSameVerdicts(
+    suiteCheck,
+    suiteOutput,
+    devCacheLintVerdicts(
+      ["crates/base", "crates/lone", "crates/mid", "crates/tool"],
+      [],
+    ),
+  )
+  devSays(suiteCheck, suiteOutput, "disallowed/placeholder name `number`")
+  devSays(suiteCheck, suiteOutput, "not checked: blocked by suite-base")
+  passed += [
+    devHeld(
+      "test-suite: after every clippy check passed, a clippy.toml that disallows a name "
+        + "which crates/base and crates/lone use fails both over the warm mirror, and "
+        + "crates/mid and crates/tool are \"not checked: blocked by suite-base\": another "
+        + "clippy.toml has a target volume of its own",
+    ),
+  ]
+  passed
+}
+
+# The verdicts of the clippy checks of packages: those of `failed` fail, and
+# those of `passed` pass.
+let devCacheLintVerdicts(failed: [String!]!, passed: [String!]!): Map[String!]! {
+  let verdicts: Map[String!]! = [:]
+  failed.each { package => verdicts = verdicts.with(devCacheClippy(package), "ERROR") }
+  passed.each { package => verdicts = verdicts.with(devCacheClippy(package), "OK") }
+  verdicts
+}
+
+# The address of a package's clippy check, without its scheme.
+let devCacheClippy(package: String!): String! {
+  "clippy&rust-workspace=.&rust-package=" + package
+}
+
+# The package that Cargo cannot tell from its stub in the dependency layer,
+# over a mirror older than a new dependency layer: the lanes must still
+# compile it, and find its error.
+let devCacheStale(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "build-stale", "volumePrefix = \"volumes-" + run.next + "\"\n")
+  let lanes = ["check", "--check=check", "--check=clippy"]
+  devSays(
+    "dagger check over build-stale",
+    devCacheFailing(workspace, run, lanes),
+    "cannot add `&str` to `u64`",
+  )
+
+  # The mirrors hold the source as the first run wrote it. This layer is
+  # newer.
+  let featured = workspace
+    .withExec(["sed", "-i", "$ a [features]", "/build-stale/Cargo.toml"])
+    .withExec(["sed", "-i", "$ a volumes-" + run.next + " = []", "/build-stale/Cargo.toml"])
+  let report = devCacheReported(featured, run, "clippy")
+  if (report.wrote != ["Cargo.toml"]) {
+    raise devCheckFailed(
+      "the clippy lane of build-stale after its dependency layer changes",
+      "did not keep the source file in its mirror:\n" + devTail(report.text),
+    )
+  }
+  let output = devCacheFailing(featured, run, lanes)
+  let check = "dagger check over build-stale after its dependency layer changes"
+  devSays(check, output, "rust: cargo check --no-default-features failed in .:")
+  devSays(check, output, "rust: clippy failed in .:")
+  devSays(check, output, "cannot add `&str` to `u64`")
+  [
+    devHeld(
+      "build-stale: after the dependency layer changes, the package's source in each mirror "
+        + "is older than the new layer and keeps its time, and the new target volumes hold "
+        + "nothing of the layer's stub: check and clippy still fail with the package's compile "
+        + "error",
+    ),
+  ]
+}
+
+# The arguments of `dagger call` for the step of a compile lane, of the
+# workspace rooted at `root`.
+let devCacheStep(root: String!, lane: String!, of: [String!]!): [String!]! {
+  devWorkspaceCall(root, ["compiled", "--lane", lane] + of)
+}
+
+# Runs a lane's step and returns the helper's report of it.
+let devCacheReported(workspace: Container!, run: DevRun!, lane: String!): DevCacheReport! {
+  let report = devCacheStep(".", lane, ["file", "--path", devCacheReportPath, "contents"])
+  devCacheRead(devStdout(workspace, run, report))
+}
+
+# Runs a lane's step with its full trace, and returns the trace and the
+# helper's report.
+let devCacheInspected(
+  workspace: Container!,
+  run: DevRun!,
+  root: String!,
+  lane: String!,
+): {{trace: String!, report: DevCacheReport!}}! {
+  let command = ["--progress=plain", "-vvv"]
+    + devCacheStep(root, lane, ["file", "--path", devCacheReportPath, "contents"])
+  let ran = devDagger(workspace, run, command)
+  let trace = ran.stderr rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  let report = ran.stdout rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  {{trace, report: devCacheRead(report)}}
+}
+
+# Checks that each of `patterns` selects a test binary that the test build
+# kept. Every digest of devCacheBinaries is compared with the first, which
+# then covers binaries, and not an empty directory.
+let devCacheSelects(workspace: Container!, run: DevRun!, patterns: [String!]!): Void {
+  devEach(patterns) { pattern =>
+    let glob = ["directory", "--path", devCacheKept, "glob", "--pattern", pattern]
+    let listed = devStdout(workspace, run, devCacheStep(".", "test", glob))
+    if (listed.trimSpace == "") {
+      raise devCheckFailed(
+        "the test binaries that " + pattern + " selects",
+        "are none, so their digest would be that of an empty directory",
+      )
+    }
+  }
+  null
+}
+
+# The digest of the test binaries that the test build kept for the runs, of
+# the files that `patterns` select.
+let devCacheBinaries(workspace: Container!, run: DevRun!, patterns: [String!]!): String! {
+  let none: [String!]! = []
+  let of = ["directory", "--path", devCacheKept, "filter"]
+    + patterns.reduce(none) { flags, pattern => flags + ["--include", pattern] } + ["digest"]
+  let printed = devStdout(workspace, run, devCacheStep(".", "test", of))
+  let digest = printed.trimSpace
+  if (digest.hasPrefix("sha256:") == false) {
+    raise devCheckFailed("the digest of the test binaries", "is " + devQuoted(digest))
+  }
+  digest
+}
+
+# What the helper reports of a lane's step: every run of the step taken
+# together. Each list is sorted, and names a file or a package once.
+type DevCacheReport {
+  # The files written to the mirror, and those removed from it.
+  let wrote: [String!]!
+  let removed: [String!]!
+
+  # How many files the first sync found the same.
+  let kept: Int!
+
+  # The manifests given a new time, their content being the same.
+  let renewed: [String!]!
+
+  # The packages Cargo compiled, and those it documented.
+  let compiled: [String!]!
+  let documented: [String!]!
+
+  # The report as the helper wrote it.
+  let text: String!
+}
+
+# Reads the helper's report: a line for each thing it did, the kind first.
+let devCacheRead(text: String!): DevCacheReport! {
+  let lines = devLines(text)
+  # `mirror wrote <n> removed <n> kept <n>`.
+  let synced = lines.filter { line => line == "mirror" or line.hasPrefix("mirror ") }
+  let kept = if (synced.length == 0) { 0 } else {
+    (JSON.decode(synced[0]!.split(" ").takeLast(1).join("")) :: Int!) rescue -1
+  }
+  DevCacheReport(
+    wrote: devCacheNamed(lines, "wrote"),
+    removed: devCacheNamed(lines, "removed"),
+    kept: kept,
+    renewed: devCacheNamed(lines, "renewed"),
+    compiled: devCacheNamed(lines, "compiled"),
+    documented: devCacheNamed(lines, "documented"),
+    text: text,
+  )
+}
+
+# What a report's lines of one kind name, sorted, each once.
+let devCacheNamed(lines: [String!]!, kind: String!): [String!]! {
+  devSorted(
+    lines.filter { line => line == kind or line.hasPrefix(kind + " ") }.map { line =>
+      line.trimPrefix(kind).trimPrefix(" ")
+    }.uniq,
+  )
+}
+
+# Checks what Cargo built in a lane's step. The doc lane compiles exactly
+# `needed`, the packages whose metadata rustdoc needs, and documents every
+# member. Another lane compiles exactly `packages`, and documents none.
+let devCacheBuilt(
+  check: String!,
+  report: DevCacheReport!,
+  lane: String!,
+  packages: [String!]!,
+  needed: [String!]!,
+): Void {
+  let none: [String!]! = []
+  let compiled = if (lane == "doc") { needed } else { packages }
+  let documented = if (lane == "doc") { devCacheMembers } else { none }
+  if (report.compiled != compiled or report.documented != documented) {
+    raise devCheckFailed(
+      check,
+      "did not compile " + devQuotedList(compiled) + " and document "
+        + devQuotedList(documented) + ", and nothing else:\n" + devTail(report.text),
+    )
+  }
+  null
+}
+
+# A cache volume that a trace names: its key, where it is mounted, how it is
+# shared, and whether it starts from a directory.
+type DevCacheMount {
+  let key: String!
+  let path: String!
+  let sharing: String!
+  let seeded: Boolean!
+}
+
+# A LOCKED volume, as every volume of a lane is.
+let devCacheLocked(key: String!, path: String!, seeded: Boolean!): DevCacheMount! {
+  DevCacheMount(key, path, "LOCKED", seeded)
+}
+
+# The cache volumes that a plain trace names, in key order. The trace gives
+# each `Container.withMountedCache` call under one number, on one line or on
+# several: the path, then the volume's key, source, sharing mode and
+# namespace.
+let devCacheMounts(trace: String!): [DevCacheMount!]! {
+  # Each call's lines, by its number.
+  let calls: Map[String!]! = [:]
+  devLines(devPlain(trace)).each { line =>
+    let parts = line.split(":", limit: 2)
+    if (parts.length < 2) {
+      continue
+    }
+    let number = parts[0]!.trimSpace
+    let rest = parts[1]!.trimLeft("┆ ")
+    if (rest.hasPrefix("Container.withMountedCache(")) {
+      if (calls.has(number) == false) {
+        calls = calls.with(number, "")
+      }
+    } else if (rest.hasPrefix("Container.withMountedCache ")) {
+      # The line that ends the call, with its state.
+      continue
+    }
+    if (calls.has(number)) {
+      calls = calls.with(number, calls[number]! + rest + "\n")
+    }
+  }
+  let mounts = calls.values.map { call =>
+    DevCacheMount(
+      devCacheQuoted(call, "key: \""),
+      devCacheQuoted(call, "path: \""),
+      devCacheSharing(call),
+      call.contains("source: "),
+    )
+  }
+  # A volume that several calls mount is the last call's.
+  devSorted(mounts.map { mount => mount.key }.uniq).map { key =>
+    mounts.filter { mount => mount.key == key }.takeLast(1)[0]!
+  }
+}
+
+# How a call shares its volume: what follows `sharing: `, up to the end of
+# the argument.
+let devCacheSharing(call: String!): String! {
+  let after = call.split("sharing: ", limit: 2).dropFirst(1).join("")
+  after.splitMatches(`[,)\n]`).takeFirst(1).join("").trimSpace
+}
+
+# What follows `name` in a call, up to the next quote.
+let devCacheQuoted(call: String!, name: String!): String! {
+  call.split(name, limit: 2).dropFirst(1).join("").split("\"").takeFirst(1).join("")
+}
+
+# Checks that a trace names exactly the cache volumes `expected`, in key
+# order.
+let devCacheMounted(check: String!, trace: String!, expected: [DevCacheMount!]!): Void {
+  let found = devCacheMounts(trace)
+  if (found != expected) {
+    raise devCheckFailed(
+      check,
+      "mounts the cache volumes\n" + devCacheVolumes(found) + "\nnot\n" + devCacheVolumes(expected),
+    )
+  }
+  null
+}
+
+# One line for each cache volume.
+let devCacheVolumes(mounts: [DevCacheMount!]!): String! {
+  mounts.map { mount =>
+    "  " + mount.key + " at " + mount.path + ", " + mount.sharing
+      + (if (mount.seeded) { ", started from a directory" } else { ", started empty" })
+  }.join("\n")
+}
+
+# Checks that the commands starting with `command` ran under the helper, that
+# there is one, and that no command of the trace is a shell.
+let devCacheUnderHelper(check: String!, execs: [DevExec!]!, command: String!): Void {
+  let lane = execs.filter { exec => exec.command.hasPrefix(command) }
+  if (lane.length == 0
+    or lane.any { exec => exec.helper == false }
+    or execs.any { exec => exec.command.hasPrefix("sh ") or exec.command.hasPrefix("bash ") }) {
+    raise devCheckFailed(
+      check,
+      "did not run `" + command + "` under the helper, or ran a shell:\n" + devDescribed(execs),
+    )
+  }
+  null
+}
+
+# Checks that a package's own test run is among a trace's commands, in
+# `state`.
+let devCacheRan(
+  check: String!,
+  steps: [DevExec!]!,
+  package: String!,
+  state: String!,
+): Void {
+  let filter = "package(=" + package + ")"
+  let runs = steps.filter { step =>
+    step.command.hasPrefix("cargo nextest run") and step.command.contains(filter)
+  }
+  if (runs.length == 0 or runs[0]!.state != state) {
+    raise devCheckFailed(
+      check,
+      "expected the run of " + package + " to be " + state + ", but traced\n" + devDescribed(steps),
+    )
+  }
+  null
+}
+
+# Runs `dagger <args>`, which must fail a check, and returns what it prints,
+# without colours.
+let devCacheFailing(workspace: Container!, run: DevRun!, args: [String!]!): String! {
+  let printed = devDagger(workspace, run, args, ANY).combinedOutput rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+  let output = devPlain(printed)
+  if (devCacheVerdicts(output).values.contains("ERROR") == false) {
+    raise devCheckFailed(
+      "dagger " + args.join(" "),
+      "failed no check, but must:\n" + devTail(output),
+    )
+  }
+  output
+}
+
+# How each check of a `dagger check` ended, by the check's address without its
+# scheme. The command reports each check on a line of its own: a mark, the
+# address, how long it took, and `OK` or `ERROR`.
+let devCacheVerdicts(output: String!): Map[String!]! {
+  let verdicts: Map[String!]! = [:]
+  devLines(output).each { line =>
+    let parts = line.trimSpace.split("dag://?check=", limit: 2)
+    if (parts.length < 2) {
+      continue
+    }
+    let words = parts[1]!.split(" ")
+    let verdict = words.takeLast(1).join("")
+    if (words.length > 1 and (verdict == "OK" or verdict == "ERROR")) {
+      verdicts = verdicts.with(words[0]!, verdict)
+    }
+  }
+  verdicts
+}
+
+# The verdicts of the four lanes' checks over the fixture: `failed` names the
+# checks that fail, a workspace's by its name and a package's clippy check as
+# `clippy <directory>`, and `untested` the packages whose test check fails.
+let devCacheVerdictsOf(failed: [String!]!, untested: [String!]!): Map[String!]! {
+  let verdicts: Map[String!]! = [:]
+  ["check", "doc"].each { check =>
+    verdicts = verdicts.with(check + "&rust-workspace=.", devCacheVerdict(
+      failed.contains(check),
+    ))
+  }
+  ["crates/base", "crates/lone", "crates/mid", "crates/tool"].each { package =>
+    verdicts = verdicts.with(
+      devCacheClippy(package),
+      devCacheVerdict(failed.contains("clippy " + package)),
+    )
+    verdicts = verdicts.with(
+      "test&rust-workspace=.&rust-package=" + package,
+      devCacheVerdict(untested.contains(package)),
+    )
+  }
+  verdicts
+}
+
+# How a check ends that failed, or did not.
+let devCacheVerdict(failed: Boolean!): String! {
+  if (failed) { "ERROR" } else { "OK" }
+}
+
+# Checks that a `dagger check` reported exactly the verdicts `expected`.
+let devCacheSameVerdicts(
+  check: String!,
+  output: String!,
+  expected: Map[String!]!,
+): Void {
+  let found = devCacheVerdicts(output)
+  if (found != expected) {
+    raise devCheckFailed(
+      check,
+      "reported\n" + devCacheShown(found) + "\nnot\n" + devCacheShown(expected) + "\n"
+        + devTail(output),
+    )
+  }
+  null
+}
+
+# One line for each verdict, in the order of the addresses.
+let devCacheShown(verdicts: Map[String!]!): String! {
+  devSorted(verdicts.keys).map { address => "  " + verdicts[address]! + " " + address }.join("\n")
+}

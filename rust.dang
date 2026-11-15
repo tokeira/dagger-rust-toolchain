@@ -1,0 +1,280 @@
+# The descriptions of the settings test, includeExtraFiles and mountPath,
+# and the check that mountPath is absolute, are adapted from go.dang in
+# dagger.io/go (https://github.com/dagger/go), Copyright 2022 Dagger, Inc.,
+# licensed under the Apache License, Version 2.0, and changed for this
+# module. See NOTICE.
+
+"""
+Rust toolchain checks for the Cargo workspaces of a repository: rustfmt,
+clippy and tests per package, and cargo check, cargo-deny and rustdoc per
+workspace.
+
+Every lane is written. A workspace's toolchain, its crates and its compiled
+dependencies are layers keyed on their inputs alone: a source edit runs none
+of them again. The lanes that compile the workspace's own packages keep
+their work in cache volumes, so that Cargo compiles again only what an edit
+reaches.
+"""
+type Rust {
+  """
+  Toolchain image. Ignored when base is set.
+  """
+  image: String!
+
+  """
+  Container that replaces image, if set.
+  """
+  base: Container
+
+  """
+  Rust toolchain for every workspace.
+
+  Null uses each workspace's rust-toolchain.toml, or else the image's
+  toolchain.
+  """
+  toolchain: String
+
+  """
+  Rust toolchain for rustfmt. Null uses toolchain.
+  """
+  fmtToolchain: String
+
+  """
+  Debian packages that build scripts need, installed in the toolchain layer.
+  """
+  systemPackages: [String!]!
+
+  """
+  Cargo features passed to every Cargo command.
+  """
+  features: [String!]!
+
+  """
+  Whether --all-features is passed to every Cargo command.
+  """
+  allFeatures: Boolean!
+
+  """
+  Whether --no-default-features is passed to every Cargo command.
+  """
+  noDefaultFeatures: Boolean!
+
+  """
+  Cargo profile passed to every Cargo command. Null uses Cargo's default.
+  """
+  buildProfile: String
+
+  """
+  Target triple passed to every Cargo command. Null uses Cargo's default.
+  """
+  target: String
+
+  """
+  Whether --locked is passed to Cargo.
+  """
+  locked: Boolean!
+
+  """
+  Configured start of every cache volume's name. Null uses the workspace name.
+  """
+  volumePrefix: String
+
+  """
+  Packages to test. "!" excludes.
+  """
+  test: [String!]!
+
+  """
+  Packages to lint with clippy. "!" excludes.
+  """
+  clippy: [String!]!
+
+  """
+  Arguments passed to clippy after "--".
+  """
+  clippyArgs: [String!]!
+
+  """
+  Test runner: "nextest" or "cargo".
+  """
+  testRunner: String!
+
+  """
+  Extra workspace files mounted for Cargo commands, as include patterns.
+  """
+  includeExtraFiles: [String!]!
+
+  """
+  Configured workspace mount path.
+
+  Null uses "/src/<workspace name>", or "/src" for a workspace made from a
+  directory or git ref.
+  """
+  mountPath: String
+
+  """
+  Workspace roots that discovery considers. "!" excludes.
+  """
+  workspaceRoots: [String!]!
+
+  new(
+    """
+    Toolchain image, pinned by the digest of its multi-platform index. Ignored
+    when base is set.
+    """
+    image: String! = rustPinnedImage,
+    """
+    Container that replaces image, for system dependencies such as protoc or
+    for services that tests need. It must carry rustup and Cargo, and be
+    Debian-based when systemPackages is set.
+    """
+    base: Container = null,
+    """
+    Rust toolchain for every workspace, such as "1.99.0", overriding each
+    workspace's rust-toolchain.toml.
+    """
+    toolchain: String = null,
+    """
+    Rust toolchain for rustfmt, such as "nightly-2026-06-16". Defaults to
+    toolchain.
+    """
+    fmtToolchain: String = null,
+    """
+    Debian packages that build scripts need, such as ["cmake", "libssl-dev"],
+    installed in the toolchain layer.
+    """
+    systemPackages: [String!]! = [],
+    """
+    Cargo features passed to every Cargo command.
+    """
+    features: [String!]! = [],
+    """
+    Pass --all-features to every Cargo command.
+    """
+    allFeatures: Boolean! = false,
+    """
+    Pass --no-default-features to every Cargo command.
+    """
+    noDefaultFeatures: Boolean! = false,
+    """
+    Cargo profile passed to every Cargo command.
+    """
+    buildProfile: String = null,
+    """
+    Target triple passed to every Cargo command.
+    """
+    target: String = null,
+    """
+    Run Cargo with --locked, so that a command fails rather than change
+    Cargo.lock.
+    """
+    locked: Boolean! = true,
+    """
+    Start of every cache volume's name. Defaults to the workspace name.
+    """
+    volumePrefix: String = null,
+    """
+    Packages to test, by workspace path, e.g. ["**", "!crates/slow"]. "!"
+    excludes.
+    """
+    test: [String!]! = ["**"],
+    """
+    Packages to lint with clippy, by workspace path. "!" excludes.
+    """
+    clippy: [String!]! = ["**"],
+    """
+    Arguments passed to clippy after "--", e.g. ["-D", "warnings"].
+    """
+    clippyArgs: [String!]! = [],
+    """
+    Test runner: "nextest" or "cargo".
+    """
+    testRunner: String! = "nextest",
+    """
+    Extra workspace files to mount for Cargo commands, as include patterns,
+    e.g. ["proto/**"].
+    """
+    includeExtraFiles: [String!]! = [],
+    """
+    Where to mount the workspace in Rust containers. Defaults to
+    "/src/<workspace name>".
+    """
+    mountPath: String = null,
+    """
+    Workspace roots that discovery considers, as directories relative to the
+    repository root, e.g. ["**", "!fixtures"]. "!" excludes, and a root left
+    out is never loaded.
+    """
+    workspaceRoots: [String!]! = ["**"],
+  ) {
+    if ((mountPath ?? "/").hasPrefix("/") == false) {
+      raise "rust: mountPath must be an absolute container path: " + (mountPath ?? "")
+    } else if (testRunner != "nextest" and testRunner != "cargo") {
+      raise "rust: testRunner must be \"nextest\" or \"cargo\": " + testRunner
+    } else {
+      self.image = image
+      self.base = base
+      self.toolchain = toolchain
+      self.fmtToolchain = fmtToolchain
+      self.systemPackages = systemPackages
+      self.features = features
+      self.allFeatures = allFeatures
+      self.noDefaultFeatures = noDefaultFeatures
+      self.buildProfile = buildProfile
+      self.target = target
+      self.locked = locked
+      self.volumePrefix = volumePrefix
+      self.test = test
+      self.clippy = clippy
+      self.clippyArgs = clippyArgs
+      self.testRunner = testRunner
+      self.includeExtraFiles = includeExtraFiles
+      self.mountPath = mountPath
+      self.workspaceRoots = workspaceRoots
+      self
+    }
+  }
+
+  """
+  Flags that every Cargo build command receives from the settings.
+
+  They are --locked, --profile, --target and the feature flags. Each lane
+  adds its own package selection.
+  """
+  cargoFlags: [String!]! {
+    let none: [String!]! = []
+    (if (locked) { ["--locked"] } else { none })
+      + (if (buildProfile == null) { none } else { ["--profile", buildProfile ?? ""] })
+      + (if (target == null) { none } else { ["--target", target ?? ""] })
+      + (if (features.length == 0) { none } else { ["--features", features.join(",")] })
+      + (if (allFeatures) { ["--all-features"] } else { none })
+      + (if (noDefaultFeatures) { ["--no-default-features"] } else { none })
+  }
+
+  """
+  Cargo workspaces, keyed by root directory.
+
+  They are the workspaces at or below the working directory, and the one
+  that holds it. Roots are relative to the repository root.
+  """
+  workspaces(ws: Workspace!): RustWorkspaces! {
+    RustWorkspaces(
+      paths: rustRootsHere(ws, rustDiscover(self, ws).roots),
+      tool: self,
+      mountPath: rustMountPath(self, ws),
+      prefix: volumePrefix ?? rustDefaultVolumePrefix(ws),
+    )
+  }
+
+  """
+  The Cargo workspace rooted at a repository path.
+  """
+  workspace(ws: Workspace!, path: String!): RustWorkspace! {
+    let root = path.trimPrefix("/").trimPrefix("./").trimSuffix("/")
+    let at = if (root == "") { "." } else { root }
+    if (rustDiscover(self, ws).roots.contains(at) == false) {
+      raise "rust: no Cargo workspace is rooted at " + at
+    }
+    rustWorkspaceAt(self, at, rustMountPath(self, ws), volumePrefix ?? rustDefaultVolumePrefix(ws))
+  }
+}

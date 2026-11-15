@@ -1,0 +1,105 @@
+# Helpers shared by every file of the module. A directory of Dang files is one
+# module, so these top-level functions are visible from every file; `let`
+# keeps them out of the module's API.
+#
+# rustPathIn, rustParent, rustSorted with rustMerged, rustSelects and
+# rustMatches are adapted from go.dang in dagger.io/go
+# (https://github.com/dagger/go), Copyright 2022 Dagger, Inc., licensed under
+# the Apache License, Version 2.0, and renamed and changed for this module.
+# See NOTICE.
+
+# The workspace path of a directory relative to a root: "." is the root.
+let rustPathIn(root: String!, dir: String!): String! {
+  if (dir == "." or dir == "") { root } else if (root == "." or root == "") { dir } else {
+    root + "/" + dir
+  }
+}
+
+# The directory holding a workspace-relative file path: "." at the root.
+let rustParent(file: String!): String! {
+  let dir = file.split("/").dropLast(1).join("/")
+  if (dir == "") { "." } else { dir }
+}
+
+# Whether a workspace path is a root or lies below it.
+let rustUnder(at: String!, root: String!): Boolean! {
+  root == "." or at == root or at.hasPrefix(root + "/")
+}
+
+# How deep a path is below the workspace root: "." is 0.
+let rustDepth(at: String!): Int! {
+  if (at == ".") { 0 } else { at.split("/").length }
+}
+
+# Patterns relative to a root, as workspace-root patterns.
+let rustScoped(root: String!, patterns: [String!]!): [String!]! {
+  if (root == ".") { patterns } else { patterns.map { p => root + "/" + p } }
+}
+
+# A root and each directory above it, from the workspace root down: for
+# "a/b", [".", "a", "a/b"].
+let rustLineage(root: String!): [String!]! {
+  let top: [String!]! = ["."]
+  if (root == ".") {
+    top
+  } else {
+    root.split("/").reduce(top) { dirs, part =>
+      dirs + [rustPathIn(dirs.takeLast(1)[0]!, part)]
+    }
+  }
+}
+
+# One line per item, each ended by a newline, as xargs -d "\n" reads them.
+let rustLines(items: [String!]!): String! {
+  if (items.length == 0) { "" } else { items.join("\n") + "\n" }
+}
+
+# Byte-order sort: a merge sort, as dagger.io/go's.
+let rustSorted(items: [String!]!): [String!]! {
+  if (items.length < 2) {
+    items
+  } else {
+    let half = items.length / 2
+    rustMerged(rustSorted(items.takeFirst(half)), rustSorted(
+      items.dropFirst(half),
+    ))
+  }
+}
+
+# Merges two byte-ordered lists into one.
+let rustMerged(a: [String!]!, b: [String!]!): [String!]! {
+  let i = 0
+  let j = 0
+  (a + b).map { unused =>
+    if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+      let item = a[i]!
+      i += 1
+      item
+    } else {
+      let item = b[j]!
+      j += 1
+      item
+    }
+  }
+}
+
+# Whether patterns select a workspace path, by dagger.io/go's rules: a pattern
+# selects its path and everything under it, "**" and "*" select everything,
+# "!" excludes and an exclusion wins whatever the order, and no selecting
+# pattern selects everything.
+let rustSelects(patterns: [String!]!, at: String!): Boolean! {
+  let selecting = patterns.filter { p => p.hasPrefix("!") == false }
+  let excluding = patterns.filter { p => p.hasPrefix("!") }.map { p => p.trimPrefix("!") }
+  (selecting.length == 0 or selecting.any { p => rustMatches(at, p) })
+    and excluding.any { p => rustMatches(at, p) } == false
+}
+
+let rustMatches(at: String!, pattern: String!): Boolean! {
+  let trimmed = pattern.trimPrefix("/").trimSuffix("/")
+  if (trimmed == "**" or trimmed == "*") {
+    true
+  } else {
+    let prefix = trimmed.trimSuffix("/**")
+    at == prefix or at.hasPrefix(prefix + "/")
+  }
+}

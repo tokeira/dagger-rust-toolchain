@@ -1,0 +1,3 @@
+# Above the workspace root, where rustfmt still finds it. The tidy package is formatted
+# to it, and would not pass under rustfmt's defaults.
+tab_spaces = 2

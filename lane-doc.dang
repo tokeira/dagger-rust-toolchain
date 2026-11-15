@@ -1,0 +1,37 @@
+# The doc lane: `cargo doc --workspace --no-deps` with warnings denied.
+# docs/lanes.md has the contract.
+
+# The lane's step: rustdoc over every member, in the lane's own volumes.
+#
+# Cargo does not track the files rustdoc reads: it documents a package again
+# when the newest of the package's own files is newer. A file outside the
+# package that its documentation includes is none of them (measured with
+# Cargo 1.100). So the helper gives every manifest a new time whenever the
+# tree changed, and rustdoc runs again for every member. What the lane keeps
+# from one run to the next is what rustc compiled: the members' metadata.
+let rustDocRun(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
+  rustCompileCargo(
+    workspace,
+    rustDependenciesLane(
+      workspace,
+      inputs,
+      "doc",
+      [],
+      rustDependenciesLayer(workspace, inputs, []),
+      "",
+    )
+      .withEnvVariable("RUSTDOCFLAGS", "-D warnings"),
+    ["cargo", "doc", "--quiet", "--workspace", "--no-deps"] + workspace.tool.cargoFlags,
+    "/tmp/rust-doc-output",
+    ["--renew", "all"],
+  )
+}
+
+# Fails when rustdoc warns about the workspace's documentation.
+let rustDocLane(workspace: RustWorkspace!, inputs: RustInputs!): Void {
+  let ran = rustDocRun(workspace, inputs)
+  if (ran.exitCode != 0) {
+    raise "rust: cargo doc failed in " + workspace.path + ":\n" + ran.stderr
+  }
+  null
+}

@@ -1,0 +1,437 @@
+# The test lane: one test build over the selected packages, then each
+# package's own run, then its doctests. docs/lanes.md has the contract.
+#
+#   build     one Cargo command builds the test binaries of every selected
+#             package, in the lane's own volumes: a target directory that
+#             starts from the dependency layer, and a mirror of the source.
+#             Every package's check builds the same step, so the engine runs
+#             it once. The step copies the files the runs need out of the
+#             volume, into its own filesystem.
+#   run       one step per package: the package's test binaries, taken from
+#             the build's kept files one at a time, over the package's own
+#             files. A file read from a step that has run is keyed on its
+#             content, so a run is cached for as long as its binaries and
+#             files are the same, whatever else the build compiled again.
+#   doctests  one `cargo test --doc` over the selected packages, in the
+#             build's container and volumes, of which each package reads its
+#             share. rustdoc compiles doctests against the libraries in the
+#             target directory, so this step runs again whenever the build
+#             does.
+
+# How many lines of a failed command's output a check reports, from the end.
+let rustTestReportLines: Int! = 200
+
+# The end of a command's output, for a check's message.
+let rustTestTail(output: String!): String! {
+  let lines = output.trimRight("\n").split("\n")
+  if (lines.length <= rustTestReportLines) {
+    lines.join("\n")
+  } else {
+    `(${lines.length - rustTestReportLines} earlier lines left out)\n`
+      + lines.takeLast(rustTestReportLines).join("\n")
+  }
+}
+
+# The flags of the settings as cargo-nextest takes them: --profile is its own
+# option, and Cargo's is --cargo-profile.
+let rustTestNextestFlags(tool: Rust!): [String!]! {
+  tool.cargoFlags.map { flag => if (flag == "--profile") { "--cargo-profile" } else { flag } }
+}
+
+# The shared test build: one Cargo command over the selected packages, in
+# the lane's volumes. It is a function of the inputs, the settings and the
+# selection only.
+#
+# Under nextest the command is `cargo nextest list --list-type binaries-only`,
+# which builds the test binaries and prints where each one is. Under cargo it
+# is `cargo test --no-run`, whose JSON messages say the same. The helper
+# writes that listing to rustCompileKept, and copies there the files it
+# names, at their paths in the target directory: the test binaries, the
+# binaries the tests run, and what the members' build scripts wrote.
+#
+# The build's environment and paths are the dependency layer's, and
+# incremental compilation is off, so a package whose inputs did not change
+# has the same test binaries, byte for byte, whether Cargo found them in a
+# warm volume or compiled them in a new one.
+let rustTestCompiled(selection: RustPackages!): Container! {
+  let workspace = selection.workspace
+  let tool = workspace.tool
+  let build = rustCompileLane(
+    workspace,
+    selection.inputs,
+    "test",
+    rustTestCargo(
+      workspace.withCrates(selection.inputs, workspace.toolchainOf(
+        selection.inputs,
+        [],
+      )),
+    ),
+    rustTestTargetDir,
+    rustTestDependencies(workspace, selection.inputs).directory(rustTestTargetDir),
+  )
+  if (tool.testRunner == "cargo") {
+    rustCompileCargo(
+      workspace,
+      build,
+      ["cargo", "test", "--no-run", "--message-format", "json-render-diagnostics"]
+        + tool.cargoFlags + selection.packageFlags(tool.test),
+      rustCompileKept + "/test-binaries.jsonl",
+      ["--keep", rustCompileKept, "--listing", "cargo"],
+    )
+  } else {
+    rustCompileCargo(
+      workspace,
+      rustTestWithNextest(tool, build),
+      ["cargo", "nextest", "list", "--list-type", "binaries-only", "--message-format", "json"]
+        + rustTestNextestFlags(tool) + selection.packageFlags(tool.test),
+      rustCompileKept + "/binaries-metadata.json",
+      ["--keep", rustCompileKept, "--listing", "nextest"],
+    )
+  }
+}
+
+# What the build kept for the runs, evaluated, so that each file read from
+# it is keyed on its content: the listing, and the files it names at their
+# paths in the target directory.
+let rustTestOutputs(selection: RustPackages!): Directory! {
+  rustTestCompiled(selection).directory(rustCompileKept).sync
+}
+
+# The workspace's metadata, which nextest reads when it runs binaries it did
+# not build. It comes from a step of its own over the source, which mounts
+# no volume: a later step must not read the mirror.
+let rustTestMetadata(selection: RustPackages!): String! {
+  let workspace = selection.workspace
+  rustTestMounted(
+    workspace,
+    selection.inputs,
+    rustTestCargo(
+      workspace.withCrates(selection.inputs, workspace.toolchainOf(
+        selection.inputs,
+        [],
+      )),
+    ),
+    selection.inputs.source,
+  )
+    .withExec(["cargo", "metadata", "--format-version", "1", "--all-features", "--no-deps"])
+    .stdout
+}
+
+# Whether a Cargo package id names the package in a directory. Cargo writes
+# an id as "path+file://<directory>#<name>@<version>", and before 1.77 as
+# "<name> <version> (path+file://<directory>)".
+let rustTestOwns(directory: String!, id: String!): Boolean! {
+  id.hasPrefix("path+file://" + directory + "#") or id.hasSuffix("(path+file://" + directory + ")")
+}
+
+# What nextest lists of a test binary. The path is absolute.
+type RustTestNextestBinary {
+  let packageId: String! @JSON.field(name: "package-id")
+  let binaryPath: String! @JSON.field(name: "binary-path")
+}
+
+# The files of a directory of the target directory, as paths in it.
+let rustTestFilesUnder(outputs: Directory!, path: String!): [String!]! {
+  outputs
+    .glob(path + "/**")
+    .filter { file => file.hasSuffix("/") == false }
+}
+
+# The files of the target directory that a package's nextest run needs, as
+# paths in it. nextest's list of the build names them: the package's test
+# binaries, and by package id the binaries its tests run and its build
+# script's output directory, then the directories of libraries that the
+# build's binaries load.
+let rustTestNextestFiles(outputs: Directory!, directory: String!): [String!]! {
+  let none: [String!]! = []
+  let list = outputs.file("binaries-metadata.json").asJson
+  let binaries = JSON.decode(`${list.field(path: ["rust-binaries"]).contents}`) :: Map[RustTestNextestBinary!]!
+  let tests = binaries
+    .values
+    .filter { binary => rustTestOwns(directory, binary.packageId) }
+    .map { binary => binary.binaryPath.trimPrefix(rustTestTargetDir + "/") }
+  let others = JSON.decode(`${list.field(path: ["rust-build-meta", "non-test-binaries"]).contents}`) :: Map[[{{path: String!}}!]!]!
+  let run = others
+    .keys
+    .filter { id => rustTestOwns(directory, id) }
+    .reduce(none) { files, id => files + others[id]!.map { binary => binary.path } }
+  let outDirs = JSON.decode(`${list.field(path: ["rust-build-meta", "build-script-out-dirs"]).contents}`) :: Map[String!]!
+  let generated = outDirs
+    .keys
+    .filter { id => rustTestOwns(directory, id) }
+    .reduce(none) { files, id => files + rustTestFilesUnder(outputs, outDirs[id]!) }
+  let linked = JSON.decode(`${list.field(path: ["rust-build-meta", "linked-paths"]).contents}`) :: [String!]!
+  let loaded = linked.reduce(none) { files, path =>
+    files + rustTestFilesUnder(outputs, path)
+  }
+  (tests + run + generated + loaded).uniq
+}
+
+# The files a package's run sees, at their paths in the repository: the
+# skeleton, so that Cargo and nextest can load the workspace, and over it
+# the package's own files, the workspace's nextest configuration, and the
+# includeExtraFiles setting's. Another member's directory below the package's
+# is that member's, not the package's.
+#
+# It is the skeleton and not the recipe, because this is what a test reads
+# when it runs, not what Cargo compiles: the skeleton has every manifest as
+# the repository has it, and the recipe has the members' versions masked.
+let rustTestView(package: RustPackage!, selection: RustPackages!): Directory! {
+  let workspace = package.workspace
+  let nested = selection
+    .members
+    .filter { member => member.path != package.path and rustUnder(member.path, package.path) }
+    .map { member => member.path }
+  workspace.skeletonOf(package.inputs).withDirectory(
+    "/",
+    package.inputs.source.filter(
+      include: rustScoped(package.path, ["**"])
+        + [rustPathIn(workspace.path, ".config/nextest.toml")]
+        + workspace.tool.includeExtraFiles,
+      exclude: nested,
+    ),
+  )
+}
+
+# The files of the build's kept files that a run needs, as a directory of
+# its own. Each is keyed on its content, and so is the directory.
+let rustTestKept(outputs: Directory!, files: [String!]!): Directory! {
+  files.reduce(directory) { kept, file => kept.withFile(file, outputs.file(file)) }
+}
+
+# The container a package's tests run in: the toolchain layer with the
+# crates, the package's view of the repository, and `kept`, the files of the
+# target directory that the run needs, at the paths the build left them. It
+# mounts no volume.
+let rustTestRunner(
+  package: RustPackage!,
+  selection: RustPackages!,
+  kept: Directory!,
+): Container! {
+  let workspace = package.workspace
+  rustTestMounted(
+    workspace,
+    package.inputs,
+    rustTestCargo(
+      workspace.withCrates(package.inputs, workspace.toolchainOf(
+        package.inputs,
+        [],
+      )),
+    ),
+    rustTestView(package, selection),
+  )
+    .withMountedDirectory(rustTestTargetDir, kept)
+}
+
+# What a package's nextest run reports when a test fails, or "".
+let rustTestNextestRun(
+  package: RustPackage!,
+  selection: RustPackages!,
+  outputs: Directory!,
+): String! {
+  let workspace = package.workspace
+  let files = ["binaries-metadata.json"]
+    + rustTestNextestFiles(outputs, rustPathIn(workspace.mountPath, package.path))
+  let kept = rustTestKept(outputs, files).withNewFile("cargo-metadata.json", rustTestMetadata(selection))
+  let ran = rustTestWithNextest(workspace.tool, rustTestRunner(
+    package,
+    selection,
+    kept,
+  ))
+    .withExec(
+      [
+        "cargo", "nextest", "run",
+        "--binaries-metadata", rustTestTargetDir + "/binaries-metadata.json",
+        "--cargo-metadata", rustTestTargetDir + "/cargo-metadata.json",
+        "-E", "package(=" + package.name + ")",
+        "--no-tests", "pass",
+        "--no-fail-fast",
+      ],
+      expect: ANY,
+    )
+  if (ran.exitCode == 0) { "" } else { rustTestTail(ran.stdout + ran.stderr) }
+}
+
+# The files of the target directory that a package's run under cargo needs,
+# as absolute paths: the test binaries first, then the binaries its tests
+# run, and what its build script wrote. Cargo's JSON messages name them: one
+# message for each compiled target, with its executable if it has one, and
+# one for each build script that ran.
+let rustTestCargoFiles(outputs: Directory!, directory: String!): {{tests: [String!]!, others: [String!]!}}! {
+  let none: [String!]! = []
+  let messages = outputs.file("test-binaries.jsonl").contents.split("\n")
+  let executables = messages
+    .filter { line => line.contains("\"reason\":\"compiler-artifact\"") and line.contains("\"executable\":\"") }
+    .map { line => JSON.decode(line) :: {{package_id: String!, executable: String!, profile: {{test: Boolean!}}!}}! }
+    .filter { artifact => rustTestOwns(directory, artifact.package_id) }
+  let generated = messages
+    .filter { line => line.contains("\"reason\":\"build-script-executed\"") }
+    .map { line => JSON.decode(line) :: {{package_id: String!, out_dir: String!}}! }
+    .filter { script => rustTestOwns(directory, script.package_id) }
+    .reduce(none) { files, script =>
+      files + rustTestFilesUnder(
+        outputs,
+        script.out_dir.trimPrefix(rustTestTargetDir + "/"),
+      )
+        .map { file => rustTestTargetDir + "/" + file }
+    }
+  {{
+    tests: rustSorted(executables.filter { artifact => artifact.profile.test }.map { artifact => artifact.executable }.uniq),
+    others: executables.filter { artifact => artifact.profile.test == false }.map { artifact => artifact.executable }.uniq
+      + generated
+  }}
+}
+
+# What a package's run under cargo reports when a test fails, or "". Each
+# test binary runs as `cargo test` runs it: in the package's directory, with
+# the toolchain's libraries where the loader finds them. Of the variables
+# Cargo sets for a test, CARGO_MANIFEST_DIR and CARGO_PKG_NAME are set.
+let rustTestCargoRun(
+  package: RustPackage!,
+  selection: RustPackages!,
+  outputs: Directory!,
+): String! {
+  let workspace = package.workspace
+  let at = rustPathIn(workspace.mountPath, package.path)
+  let files = rustTestCargoFiles(outputs, at)
+  let runner = rustTestRunner(
+    package,
+    selection,
+    rustTestKept(
+      outputs,
+      (files.tests + files.others).map { file => file.trimPrefix(rustTestTargetDir + "/") },
+    ),
+  )
+  let libraries = workspace
+    .toolchainOf(package.inputs, [])
+    .withExec(["rustc", "--print", "target-libdir"])
+    .stdout
+    .trimSpace
+  let ready = runner
+    .withWorkdir(at)
+    .withEnvVariable("CARGO_MANIFEST_DIR", at)
+    .withEnvVariable("CARGO_PKG_NAME", package.name)
+    .withEnvVariable("LD_LIBRARY_PATH", libraries)
+  files.tests.reduce("") { failures, test =>
+    let ran = ready.withExec([test], expect: ANY)
+    if (ran.exitCode == 0) { failures } else { failures + rustTestTail(ran.stdout + ran.stderr) + "\n" }
+  }
+}
+
+# How the line starts that Cargo prints after a package's doctests when they
+# failed. The arguments that run them again follow, between backticks.
+let rustTestDoctestHint: String! = "error: doctest failed, to rerun pass `"
+
+# The name of the covered package that a hint is about, or "" when the hint
+# names none of them.
+#
+# Cargo names the package with `-p <name>` when its own command needed a
+# package flag: when it ran with `-p`, or with `--workspace` over more than
+# one member. Over a workspace with one member the hint is `--doc` alone,
+# and it is about that member. A specification with a version,
+# `-p <name>@<version>`, names the package too.
+let rustTestDoctestOwner(hint: String!, covered: [RustMember!]!): String! {
+  let arguments = hint.trimPrefix(rustTestDoctestHint).trimSuffix("`").split(" ")
+  if (arguments.length > 1 and arguments[0]! == "-p") {
+    let name = arguments[1]!.split("@")[0]!
+    if (covered.any { member => member.name == name }) { name } else { "" }
+  } else if (covered.length == 1) {
+    covered[0]!.name
+  } else {
+    ""
+  }
+}
+
+# What a package's doctests report when one fails, or "". The step is shared:
+# after each package's doctests, Cargo prints a hint if they failed, and each
+# package's check looks for its own.
+#
+# A failed step passes a package only when every hint is about another
+# covered package. When a hint is about none of them, or the step failed
+# with no hint at all, nothing says whose doctests failed or whether they
+# ran, and every covered package fails. The exception is Cargo's "no library
+# targets found": no package it was given has a library, so there is no
+# doctest to run, and every package passes.
+#
+# The package's share of the output is what Cargo and rustdoc printed
+# between "Doc-tests <crate>" and the package's hint. Cargo writes those two
+# lines to stderr and rustdoc writes the doctests' report to stdout, so the
+# engine can record the report after the hint, as it did on a busy engine. A
+# share without the report's "test result:" line is not the whole of it: the
+# package then gets the step's whole output.
+#
+# The step runs under the helper, in the build's container and volumes. It
+# syncs the mirror and lets Cargo see to the libraries itself, so it is
+# right even if another run's build has used the volumes since this build.
+let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
+  let tool = package.workspace.tool
+  let covered = selection.selected(tool.test)
+  let ran = rustCompileCargo(
+    package.workspace,
+    rustTestCompiled(selection),
+    ["cargo", "test", "--doc", "--no-fail-fast"] + tool.cargoFlags + selection.packageFlags(tool.test),
+    "",
+    [],
+  )
+  if (ran.exitCode == 0) { "" } else {
+    let errors = ran.stderr
+    let lines = errors.split("\n")
+    let hints = lines.filter { line => line.hasPrefix(rustTestDoctestHint) }
+    let own = hints.filter { hint => rustTestDoctestOwner(hint, covered) == package.name }
+    if (hints.length == 0) {
+      if (lines.any { line => line.hasPrefix("error: no library targets found in package") }) { "" } else {
+        "the doctests did not run:\n" + rustTestTail(errors)
+      }
+    } else if (hints.any { hint => rustTestDoctestOwner(hint, covered) == "" }) {
+      "a doctest failed, and Cargo's output does not say in which of the packages "
+        + covered.map { member => member.name }.join(", ") + ":\n"
+        + rustTestTail(ran.stdout + errors)
+    } else if (own.length == 0) {
+      ""
+    } else {
+      let before = ran.combinedOutput.split(own[0]!)
+      let share = if (before.length < 2) { "" } else {
+        before[0]!.split("   Doc-tests ").takeLast(1).join("")
+      }
+      if (share.contains("test result: ")) {
+        rustTestTail("Doc-tests " + share + own[0]!)
+      } else {
+        rustTestTail(ran.stdout + errors)
+      }
+    }
+  }
+}
+
+# What to tell the user of a package's tests, or "" when they pass.
+let rustTestFailure(package: RustPackage!, selection: RustPackages!): String! {
+  let compiled = rustTestCompiled(selection)
+  if (compiled.exitCode != 0) {
+    let errors = compiled.stderr
+    if (errors.contains("could not compile `" + package.name + "`")) {
+      rustTestTail(errors)
+    } else {
+      "not tested: the test build failed.\n" + rustTestTail(errors)
+    }
+  } else {
+    let outputs = rustTestOutputs(selection)
+    let run = if (package.workspace.tool.testRunner == "cargo") {
+      rustTestCargoRun(package, selection, outputs)
+    } else {
+      rustTestNextestRun(package, selection, outputs)
+    }
+    let doctests = rustTestDoctests(package, selection)
+    [run, doctests].filter { failure => failure != "" }.join("\n")
+  }
+}
+
+# Fails when the test build fails, or one of a package's tests or doctests.
+let rustTestLane(package: RustPackage!, selection: RustPackages!): Void {
+  let covered = selection.selected(package.workspace.tool.test)
+  let position = covered.filter { member => member.path < package.path }.length
+  let results = if (covered.any { member => member.path == package.path }) {
+    directory.withNewFile(`${position}`, rustTestFailure(package, selection))
+  } else {
+    directory
+  }
+  RustLaneResults(lane: "test", covered: covered, results: results).assertPassed(package.path)
+}

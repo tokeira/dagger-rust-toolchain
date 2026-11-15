@@ -1,0 +1,145 @@
+# Cargo packages: the collection of one workspace's members, one package,
+# and the package-level checks and generator. Each forwards to its lane's
+# file.
+#
+# The delta and narrowed members of RustPackages are adapted from go.dang in
+# dagger.io/go (https://github.com/dagger/go), Copyright 2022 Dagger, Inc.,
+# licensed under the Apache License, Version 2.0. See NOTICE.
+
+"""
+A member package of a Cargo workspace.
+"""
+type RustMember {
+  """
+  Package directory, relative to the repository root.
+  """
+  path: String!
+
+  """
+  Package name, as Cargo's -p flag takes it.
+  """
+  name: String!
+}
+
+"""
+The member packages of one Cargo workspace, keyed by directory.
+
+Directories are relative to the repository root.
+"""
+type RustPackages @collection {
+  """
+  Package directories, relative to the repository root.
+  """
+  paths: [String!]! @keys
+
+  """
+  Packages selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta @delta
+
+  # Every member of the workspace, selected or not. The engine filters paths
+  # when it passes a selection; this list stays whole.
+  let members: [RustMember!]!
+
+  let workspace: RustWorkspace!
+  let inputs: RustInputs!
+
+  """
+  Whether the selection left packages of the workspace out.
+  """
+  narrowed: Boolean! {
+    delta == null or delta!.addedKeys.length > 0 or delta!.removedKeys.length > 0
+  }
+
+  # The selected members that patterns select too, in key order: the packages
+  # a lane's shared step covers.
+  let selected(patterns: [String!]!): [RustMember!]! {
+    members.filter { member =>
+      paths.contains(member.path) and rustSelects(patterns, member.path)
+    }
+  }
+
+  # How a shared Cargo command names the packages it covers: --workspace when
+  # the selection and the patterns leave no member out, and otherwise -p for
+  # each one. It raises when they leave every member out: Cargo, given no
+  # package, would run on them all.
+  let packageFlags(patterns: [String!]!): [String!]! {
+    let chosen = selected(patterns)
+    let none: [String!]! = []
+    if (chosen.length == 0) {
+      raise "rust: no package of the workspace " + workspace.path + " is selected"
+    }
+    if (narrowed == false and chosen.length == members.length) {
+      ["--workspace"]
+    } else {
+      chosen.reduce(none) { flags, member => flags + ["-p", member.name] }
+    }
+  }
+
+  """
+  The package in this directory.
+  """
+  package(path: String!): RustPackage! @get {
+    RustPackage(
+      path: path,
+      name: members.filter { member => member.path == path }[0]!.name,
+      workspace: workspace,
+      inputs: inputs,
+    )
+  }
+}
+
+"""
+A Cargo package.
+"""
+type RustPackage {
+  """
+  Package directory, relative to the repository root.
+  """
+  path: String!
+
+  """
+  Package name.
+  """
+  name: String!
+
+  let workspace: RustWorkspace!
+  let inputs: RustInputs!
+
+  """
+  Whether the clippy setting leaves this package out.
+  """
+  skipClippy: Boolean! { rustSelects(workspace.tool.clippy, path) == false }
+
+  """
+  Whether the test setting leaves this package out.
+  """
+  skipTest: Boolean! { rustSelects(workspace.tool.test, path) == false }
+
+  """
+  Format this package with rustfmt.
+  """
+  fmt: Changeset! @generate {
+    rustFmtLane(self)
+  }
+
+  """
+  Lint this package with clippy.
+  """
+  clippy(selection: RustPackages!): Void @check {
+    if (skipClippy == false) {
+      rustClippyLane(self, selection)
+    }
+    null
+  }
+
+  """
+  Run this package's tests.
+  """
+  test(selection: RustPackages!): Void @check {
+    if (skipTest == false) {
+      rustTestLane(self, selection)
+    }
+    null
+  }
+}

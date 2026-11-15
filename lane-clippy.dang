@@ -1,0 +1,285 @@
+# The clippy lane: one `cargo clippy` over the selected packages, of which
+# each package's check reads its share. docs/lanes.md has the contract.
+#
+# The command is
+#
+#   cargo clippy <packages> --all-targets --keep-going --message-format=json
+#     <the settings' flags> -- --no-deps <clippyArgs>
+#
+# It runs once for a selection. With --keep-going Cargo compiles everything
+# that does not need a package that failed, and with JSON messages each
+# diagnostic names its package. A package fails when clippy reports an error
+# in it, and is "not checked" when a package it needs failed. Warnings fail
+# nothing unless clippyArgs or the workspace's own lint policy deny them.
+#
+# clippy's --no-deps keeps its lints to the packages the command names. A
+# member that is compiled only because a named package needs it is compiled
+# and not linted, so a package the clippy setting leaves out cannot fail
+# another's check with a lint.
+
+# Where the shared step keeps Cargo's JSON messages.
+let rustClippyMessages: String! = "/tmp/rust-clippy-messages.json"
+
+# The kinds of Cargo target that other packages are compiled against, and a
+# build script, which its package's library waits for. A package with an
+# error in one of these may stop the packages that need it.
+let rustClippyLinked: [String!]! = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "custom-build"]
+
+# An error clippy reported: the package it is in, as Cargo identifies it,
+# whether its target is one other packages need, and the text to show.
+type RustClippyError {
+  let package: String!
+  let linked: Boolean!
+  let text: String!
+}
+
+# A member that depends on another by path, both as package directories.
+type RustClippyEdge {
+  let package: String!
+  let dependency: String!
+}
+
+# The lane's marks: what its command covers that Cargo cannot tell.
+#
+#   the packages   clippy lints the packages its command names, and only
+#                  compiles a member that is there because a named package
+#                  needs it. Cargo takes what either left for the same
+#                  thing: with Cargo 1.100, a member with a lint error that
+#                  `cargo clippy -p <a package that needs it>` had compiled
+#                  passed `cargo clippy --workspace` in the same target
+#                  directory, unlinted.
+#   clippy.toml    clippy reads it, and Cargo does not know: with Cargo
+#                  1.100, an edit to it left every member that had passed
+#                  as it was.
+#   clippyArgs     clippy 1.100 records its arguments with what it compiles,
+#                  and Cargo then compiles the members again when they
+#                  change. A workspace's toolchain may be an older one, so
+#                  the lane does not rely on it.
+#
+# A command with other marks gets another target volume, so that no member
+# is taken for linted that was not, or was under another configuration.
+let rustClippyMarks(selection: RustPackages!): String! {
+  let tool = selection.workspace.tool
+  let covered = selection.selected(tool.clippy)
+  let configured = selection.inputs.source.filter(include: ["**/clippy.toml", "**/.clippy.toml"])
+  let files = rustSorted(
+    (configured.glob("**/clippy.toml") + configured.glob("**/.clippy.toml"))
+      .filter { file => file.hasSuffix("/") == false }
+      .uniq,
+  )
+  rustLines(["packages:"] + covered.map { member => member.path })
+    + rustLines(["arguments:"] + tool.clippyArgs)
+    + files.map { file => file + ":\n" + configured.file(file).contents }.join("\n")
+}
+
+# The shared step: clippy over the packages that the selection and the
+# clippy setting select, in the lane's own volumes, with Cargo's JSON
+# messages kept in a file of the step. It is a function of the selection
+# alone, so every package's check builds the same step and the engine runs
+# it once.
+#
+# A warm volume changes no verdict. Cargo names a member it finds fresh
+# among its artifacts, as it names one it compiled, and a member with an
+# error is never fresh: Cargo compiles it again, and reports the error again.
+# What Cargo cannot tell is in the lane's marks.
+let rustClippyRun(selection: RustPackages!): Container! {
+  let workspace = selection.workspace
+  let tool = workspace.tool
+  let marks = rustClippyMarks(selection)
+  rustCompileCargo(
+    workspace,
+    rustDependenciesLane(
+      workspace,
+      selection.inputs,
+      "clippy",
+      ["clippy"],
+      rustDependenciesLayer(workspace, selection.inputs, []),
+      marks,
+    ),
+    ["cargo", "clippy", "--quiet"]
+      + selection.packageFlags(tool.clippy)
+      + ["--all-targets", "--keep-going", "--message-format=json"]
+      + tool.cargoFlags
+      + ["--", "--no-deps"]
+      + tool.clippyArgs,
+    rustClippyMessages,
+    ["--marks", rustCompileMarked],
+  )
+}
+
+# What the shared step found: one file per covered package, named by the
+# package's position among them, empty when the package passed.
+let rustClippyStep(selection: RustPackages!): Directory! {
+  let covered = selection.selected(selection.workspace.tool.clippy)
+  let ran = rustClippyRun(selection)
+  let reports = if (ran.exitCode == 0) {
+    covered.map { member => "" }
+  } else {
+    rustClippyReports(selection, covered, ran)
+  }
+  let position = 0
+  reports.reduce(directory) { results, report =>
+    let name = `${position}`
+    position += 1
+    results.withNewFile(name, report)
+  }
+}
+
+# Whether Cargo's identifier of a package names the member in a directory.
+# Cargo writes `path+file://<directory>#<name>@<version>`, and before 1.77
+# `<name> <version> (path+file://<directory>)`.
+let rustClippyOwns(
+  workspace: RustWorkspace!,
+  member: RustMember!,
+  package: String!,
+): Boolean! {
+  let location = "path+file://" + rustPathIn(workspace.mountPath, member.path)
+  package.contains(location + "#") or package.hasSuffix("(" + location + ")")
+}
+
+# The errors among Cargo's JSON messages. Only lines that can hold one are
+# decoded: a build prints a line for every artifact too.
+let rustClippyErrors(messages: String!): [RustClippyError!]! {
+  messages
+    .split("\n")
+    .filter { line =>
+      line.contains("\"reason\":\"compiler-message\"") and line.contains("\"level\":\"error")
+    }
+    .map { line =>
+      JSON.decode(line) :: {{package_id: String!, target: {{kind: [String!]!}}!, message: {{level: String!, rendered: String}}!}}!
+    }
+    .filter { found => found.message.level.hasPrefix("error") }
+    .map { found =>
+      RustClippyError(
+        package: found.package_id,
+        linked: found.target.kind.any { kind => rustClippyLinked.contains(kind) },
+        text: found.message.rendered ?? "",
+      )
+    }
+}
+
+# Cargo's identifiers of the packages whose library was compiled for other
+# packages to use: those with an artifact of a library target that is not
+# its test build. Only the lines of packages taken from a path are decoded.
+let rustClippyBuilt(messages: String!): [String!]! {
+  messages
+    .split("\n")
+    .filter { line =>
+      line.contains("\"reason\":\"compiler-artifact\"") and line.contains("path+file://")
+    }
+    .map { line =>
+      JSON.decode(line) :: {{package_id: String!, target: {{kind: [String!]!}}!, profile: {{test: Boolean!}}!}}!
+    }
+    .filter { found =>
+      found.profile.test == false
+        and found.target.kind.any { kind => kind != "custom-build" and rustClippyLinked.contains(kind) }
+    }
+    .map { found => found.package_id }
+}
+
+# Which member depends on which by path, from `cargo metadata` over the
+# recipe: a step keyed on the manifests, which a source edit leaves cached.
+let rustClippyEdges(selection: RustPackages!): [RustClippyEdge!]! {
+  let workspace = selection.workspace
+  let none: [RustClippyEdge!]! = []
+  let metadata = JSON.decode(
+    workspace
+      .fetchedOf(selection.inputs)
+      .withEnvVariable("CARGO_NET_OFFLINE", "true")
+      .withExec(["cargo", "metadata", "--no-deps", "--format-version", "1"])
+      .stdout,
+  ) :: {{packages: [{{manifest_path: String!, dependencies: [{{path: String}}!]!}}!]!}}!
+  metadata.packages.reduce(none) { edges, package =>
+    let users = selection.members.filter { member =>
+      rustPathIn(rustPathIn(workspace.mountPath, member.path), "Cargo.toml") == package.manifest_path
+    }
+    edges + users.reduce(none) { found, user =>
+      found + selection
+        .members
+        .filter { member =>
+          package.dependencies.any { dependency =>
+            (dependency.path ?? "") == rustPathIn(workspace.mountPath, member.path)
+          }
+        }
+        .map { member => RustClippyEdge(package: user.path, dependency: member.path) }
+    }
+  }
+}
+
+# The members that a set of members needs: those they depend on by path, and
+# theirs in turn.
+let rustClippyNeeds(
+  edges: [RustClippyEdge!]!,
+  seen: [String!]!,
+  frontier: [String!]!,
+): [String!]! {
+  let none: [String!]! = []
+  let next = frontier
+    .reduce(none) { found, package =>
+      found + edges.filter { edge => edge.package == package }.map { edge => edge.dependency }
+    }
+    .uniq
+    .filter { dependency => seen.contains(dependency) == false }
+  if (next.length == 0) { seen } else { rustClippyNeeds(edges, seen + next, next) }
+}
+
+# What to tell each covered package of a run that failed, in their order:
+# its own errors, or the failed packages it needs, or nothing.
+#
+# A member stops those that need it when it has an error in its library or
+# build script and Cargo did not get its library compiled. An error in its
+# tests alone stops nobody.
+#
+# A failure that no member's error explains fails every package the run did
+# not clear: an error in a dependency, a build script that failed, or Cargo
+# stopping before it compiled anything.
+let rustClippyReports(
+  selection: RustPackages!,
+  covered: [RustMember!]!,
+  ran: Container!,
+): [String!]! {
+  let workspace = selection.workspace
+  let stderr = ran.stderr
+  let messages = ran.file(rustClippyMessages).contents
+  let errors = rustClippyErrors(messages)
+  let built = rustClippyBuilt(messages)
+  let foreign = errors.filter { found =>
+    selection.members.any { member => rustClippyOwns(workspace, member, found.package) } == false
+  }
+  let blockers = selection.members.filter { member =>
+    errors.any { found => found.linked and rustClippyOwns(workspace, member, found.package) }
+      and built.any { package => rustClippyOwns(workspace, member, package) } == false
+  }
+  let unexplained = errors.length == 0
+    or foreign.length > 0
+    or stderr.contains("failed to run custom build command")
+  let none: [RustClippyEdge!]! = []
+  let edges = if (blockers.length == 0) { none } else { rustClippyEdges(selection) }
+  covered.map { member =>
+    let own = errors
+      .filter { found => rustClippyOwns(workspace, member, found.package) }
+      .map { found => found.text }
+      .uniq
+    if (own.length > 0) {
+      own.join("\n")
+    } else {
+      let needs = rustClippyNeeds(edges, [], [member.path])
+      let blocking = blockers.filter { blocker => needs.contains(blocker.path) }
+      if (blocking.length > 0) {
+        "not checked: blocked by " + blocking.map { blocker => blocker.name }.join(", ")
+      } else if (unexplained) {
+        "not checked: cargo clippy failed, and no compiler error in a member explains it:\n"
+          + (foreign.map { found => found.text }.uniq + [stderr]).join("\n")
+      } else {
+        ""
+      }
+    }
+  }
+}
+
+# Fails when clippy reports an error in a package, or could not check it.
+let rustClippyLane(package: RustPackage!, selection: RustPackages!): Void {
+  let covered = selection.selected(package.workspace.tool.clippy)
+  RustLaneResults(lane: "clippy", covered: covered, results: rustClippyStep(selection))
+    .assertPassed(package.path)
+}

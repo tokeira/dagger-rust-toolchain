@@ -1,0 +1,345 @@
+# Cargo workspaces: the collection, one workspace, its prepared inputs, its
+# layers, and the workspace-level checks. Each check forwards to its lane's
+# file.
+
+# The cache-volume prefix of a workspace: the volumePrefix setting or the
+# workspace name, then the root's path when the root is not the repository's,
+# so that two Cargo workspaces of one repository never share a volume.
+let rustVolumePrefix(prefix: String!, root: String!): String! {
+  if (root == ".") { prefix } else { prefix + "-" + root.split("/").join("-") }
+}
+
+let rustWorkspaceAt(
+  tool: Rust!,
+  root: String!,
+  mountPath: String!,
+  prefix: String!,
+): RustWorkspace! {
+  RustWorkspace(
+    path: root,
+    mountPath: mountPath,
+    volumePrefix: rustVolumePrefix(prefix, root),
+    tool: tool,
+  )
+}
+
+"""
+Cargo workspaces in a repository, keyed by root directory.
+"""
+type RustWorkspaces @collection {
+  """
+  Workspace roots, relative to the repository root.
+
+  "." is the repository root.
+  """
+  paths: [String!]! @keys
+
+  let tool: Rust!
+  let mountPath: String!
+  let prefix: String!
+
+  """
+  The workspace rooted at this path.
+  """
+  workspace(path: String!): RustWorkspace! @get {
+    rustWorkspaceAt(tool, path, mountPath, prefix)
+  }
+}
+
+# What a workspace's steps read from the repository, prepared once so that
+# checks and generators need no Workspace. Each is a view of the repository
+# root: paths in it are relative to the repository root. Nothing here runs a
+# container.
+type RustInputs {
+  # The rust-toolchain and rust-toolchain.toml files of the workspace root
+  # and of the directories above it.
+  let toolchainFiles: Directory!
+
+  # The files Cargo reads to load and resolve the workspace: manifests,
+  # Cargo.lock, Cargo configuration and the toolchain files.
+  let manifests: Directory!
+
+  # Paths of the files that make the workspace's Cargo targets.
+  let targets: [String!]!
+
+  # The workspace's files, and the includeExtraFiles setting's.
+  let source: Directory!
+
+  # The rustfmt configuration files of the directories above the workspace
+  # root, which the fmt lane reads. lane-fmt.dang has the reason.
+  let formatFiles: Directory!
+}
+
+"""
+A Cargo workspace: a root Cargo.toml with a [workspace] table, or a package
+with its own Cargo.lock.
+"""
+type RustWorkspace {
+  """
+  Workspace root, relative to the repository root.
+
+  "." is the repository root.
+  """
+  path: String!
+
+  """
+  Container path where the repository is mounted for Cargo commands.
+  """
+  mountPath: String!
+
+  """
+  Start of the name of each cache volume this workspace mounts.
+  """
+  volumePrefix: String!
+
+  let tool: Rust!
+
+  """
+  Container path of the workspace root, where Cargo commands run.
+  """
+  workdir: String! { rustPathIn(mountPath, path) }
+
+  # The prepared inputs of this workspace. Workspaces rooted below this one
+  # are left out: they are workspaces of their own.
+  let inputs(ws: Workspace!, found: RustDiscovery!): RustInputs! {
+    let nested = found.roots.filter { root => root != path and rustUnder(root, path) }
+    let above = rustLineage(path).filter { dir => dir != path }
+    let configs = above
+      .map { dir => rustPathIn(dir, ".cargo/config.toml") }
+      + above.map { dir => rustPathIn(dir, ".cargo/config") }
+    let toolchains = rustToolchainPaths(path)
+    let manifests = ws.directory(
+      "/",
+      include: rustScoped(path, rustManifestPatterns + ["**/Cargo.lock"]) + configs + toolchains,
+      exclude: nested,
+      gitignore: true,
+    )
+    let source = ws.directory(
+      "/",
+      include: rustScoped(path, ["**"]) + configs + toolchains,
+      exclude: [".git", "dagger.toml", "dagger.lock", rustPathIn(path, "target")] + nested,
+      gitignore: true,
+    )
+    let targets = found.targets.filter { file =>
+      rustUnder(file, path) and nested.any { root => rustUnder(file, root) } == false
+    }
+    if (tool.includeExtraFiles.length == 0) {
+      RustInputs(
+        toolchainFiles: ws.directory("/", include: toolchains),
+        manifests: manifests,
+        targets: targets,
+        source: source,
+        formatFiles: rustFmtConfigsAbove(ws, path),
+      )
+    } else {
+      # Extra files may hold packages the workspace depends on by path, so
+      # their manifests and targets join the workspace's.
+      let extra = ws.directory("/", include: tool.includeExtraFiles, gitignore: true)
+      RustInputs(
+        toolchainFiles: ws.directory("/", include: toolchains),
+        manifests: manifests.withDirectory(
+          "/",
+          extra.filter(include: rustManifestPatterns + ["**/Cargo.lock"]),
+        ),
+        targets: (
+          targets + rustTargetFiles(extra.filter(include: rustTargetPatterns))
+        ).uniq,
+        source: source.withDirectory("/", extra),
+        formatFiles: rustFmtConfigsAbove(ws, path),
+      )
+    }
+  }
+
+  # The workspace's skeleton: its manifests, with an empty file in place of
+  # each file that makes a Cargo target. Keyed on the manifests, Cargo.lock,
+  # the Cargo configuration, the toolchain files and the set of target paths.
+  let skeletonOf(inputs: RustInputs!): Directory! {
+    rustSkeleton(rustImage(tool), inputs.manifests, inputs.targets)
+  }
+
+  # The toolchain layer, with the components a lane asks for.
+  let toolchainOf(inputs: RustInputs!, components: [String!]!): Container! {
+    rustToolchainLayer(
+      tool,
+      mountPath,
+      path,
+      inputs.toolchainFiles,
+      tool.toolchain,
+      components,
+    )
+  }
+
+  # The fmt toolchain layer: the fmtToolchain setting's toolchain, or else the
+  # workspace's, with rustfmt.
+  let fmtToolchainOf(inputs: RustInputs!): Container! {
+    rustToolchainLayer(
+      tool,
+      mountPath,
+      path,
+      inputs.toolchainFiles,
+      tool.fmtToolchain ?? tool.toolchain,
+      ["rustfmt"],
+    )
+  }
+
+  # The recipe: the workspace as cargo-chef restores it from the skeleton,
+  # with the members' versions masked and a stub that compiles in place of
+  # each target's source. Keyed on what it says, so a release bump leaves it
+  # as it was. The fetch layer and the dependency layers run over it.
+  let recipeOf(inputs: RustInputs!): Directory! {
+    rustDependenciesRecipe(self, inputs)
+  }
+
+  # The fetch layer: the toolchain layer with the workspace's crates
+  # downloaded into Cargo's home, and the recipe mounted. The workspace has
+  # one, and every lane takes its crates from it.
+  let fetchedOf(inputs: RustInputs!): Container! {
+    rustFetchLayer(tool, toolchainOf(inputs, []), mountPath, recipeOf(inputs))
+  }
+
+  # A lane's own container with the fetch layer's crates in Cargo's home and
+  # Cargo kept off the network.
+  let withCrates(inputs: RustInputs!, ctr: Container!): Container! {
+    rustWithCrates(tool, ctr, fetchedOf(inputs))
+  }
+
+  """
+  Member packages, keyed by directory.
+
+  Directories are relative to the repository root.
+  """
+  packages(ws: Workspace!): RustPackages! {
+    let found = rustDiscover(tool, ws)
+    let members = rustMembers(tool, found, path)
+    RustPackages(
+      paths: members.map { member => member.path },
+      members: members,
+      workspace: self,
+      inputs: inputs(ws, found),
+    )
+  }
+
+  """
+  The files Cargo commands see.
+
+  They are the workspace's own files and the includeExtraFiles setting's, at
+  their paths relative to the repository root.
+  """
+  source(ws: Workspace!): Directory! {
+    inputs(ws, rustDiscover(tool, ws)).source
+  }
+
+  """
+  The workspace without the contents of its source files.
+
+  It holds the manifests, Cargo.lock and Cargo configuration, with an empty
+  file in place of each file that makes a Cargo target. Discovery and the
+  recipe are made from it, so source edits leave them cached.
+  """
+  skeleton(ws: Workspace!): Directory! {
+    skeletonOf(inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  The toolchain layer.
+
+  It is the image with this workspace's toolchain installed, and the given
+  rustup components. Source edits leave it cached.
+  """
+  toolchain(ws: Workspace!, components: [String!]! = []): Container! {
+    toolchainOf(inputs(ws, rustDiscover(tool, ws)), components)
+  }
+
+  """
+  The fmt toolchain layer.
+
+  It is the image with the toolchain that rustfmt runs under, and rustfmt.
+  """
+  fmtToolchain(ws: Workspace!): Container! {
+    fmtToolchainOf(inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  The fetch layer.
+
+  It is the toolchain layer with this workspace's crates downloaded by cargo
+  fetch into Cargo's home, not into a cache volume, and the recipe mounted.
+  """
+  fetched(ws: Workspace!): Container! {
+    fetchedOf(inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  Type-check the workspace with cargo check.
+
+  Covers the feature sets that clippy does not.
+  """
+  check(ws: Workspace!): Void @check {
+    rustCheckLane(self, inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  Check the workspace's dependencies with cargo-deny.
+
+  Applies when the workspace has a deny.toml.
+  """
+  deny(ws: Workspace!): Void @check {
+    rustDenyLane(self, inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  Build the workspace's documentation with rustdoc.
+
+  Warnings fail the check.
+  """
+  doc(ws: Workspace!): Void @check {
+    rustDocLane(self, inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  The recipe of the fetch layer and the dependency layer.
+
+  It holds what Cargo needs to fetch and compile the workspace's
+  dependencies: the manifests with the members' versions masked, Cargo.lock
+  and a stub in place of each target's source.
+  """
+  recipe(ws: Workspace!): Directory! {
+    recipeOf(inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  The dependency layer, check flavour.
+
+  It is the fetch layer with the workspace's dependencies compiled by cargo
+  check and none of its members. Source edits leave it cached.
+  """
+  checkDependencies(ws: Workspace!): Container! {
+    rustDependenciesLayer(self, inputs(ws, rustDiscover(tool, ws)), [])
+  }
+
+  """
+  The dependency layer, test flavour.
+
+  It is the toolchain layer with the workspace's dependencies compiled as
+  cargo test builds them, and none of its members. Source edits leave it
+  cached.
+  """
+  testDependencies(ws: Workspace!): Container! {
+    rustTestDependencies(self, inputs(ws, rustDiscover(tool, ws)))
+  }
+
+  """
+  A compile lane's step, to inspect it.
+
+  It is the container after the Cargo command of the lane "check", "clippy",
+  "doc" or "test", run over every package that the lane's setting selects.
+  The file /var/cache/rust/report says what the step did: the files its
+  source mirror wrote and removed, and the packages Cargo compiled.
+
+  The report helps inspect a lane. Its format may change between releases,
+  and no check's verdict depends on it.
+  """
+  compiled(ws: Workspace!, lane: String!): Container! {
+    rustCompileStep(self, packages(ws), lane)
+  }
+}

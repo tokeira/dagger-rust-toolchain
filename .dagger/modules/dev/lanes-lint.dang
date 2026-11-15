@@ -1,0 +1,285 @@
+# The acceptance of the fmt and deny lanes, and of the `workspaceRoots`
+# setting.
+#
+# The fixtures are `lint-roots`, a repository with a Cargo project that Cargo
+# cannot load; `lint-fmt`, a workspace with packages that rustfmt changes and
+# one it leaves alone; and `lint-deny`, workspaces with and without a
+# `deny.toml`.
+
+# What the engine's `stale` check says when a generator returns changes.
+let devLintStale: String! = "generated files are not up to date"
+
+# Runs the assertions of the fmt and deny lanes and of `workspaceRoots`. Each
+# group is bound before the lists are joined, as in devBuild.
+let devLint(run: DevRun!): [String!]! {
+  let single = devLintSingle(run)
+  let roots = devLintRoots(run)
+  let fmt = devLintFmt(run)
+  let deny = devLintDeny(run)
+  single + roots + fmt + deny
+}
+
+# The single-package fixture, which is formatted and has no `deny.toml`.
+let devLintSingle(run: DevRun!): [String!]! {
+  let workspace = devConsumer(run, "single", "")
+  devStdout(workspace, run, ["check", "--check=stale"])
+  devStdout(workspace, run, ["generate", "--no-apply"])
+  devStdout(workspace, run, ["check", "--check=deny"])
+  [
+    devHeld(
+      "single: the stale check and dagger generate pass on a formatted package, and the deny "
+        + "check passes in a workspace with no deny.toml",
+    ),
+  ]
+}
+
+# The `workspaceRoots` setting: a root it leaves out is never loaded, and a
+# member below a directory it leaves out stays a package of its workspace.
+let devLintRoots(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "lint-roots", "")
+  let first = {{root: "first", packages: ["first/lib", "first/vendor/kept"]}}
+  let second = {{root: "second", packages: ["second"]}}
+
+  let listing = ["check", "-l", "--all", "-f=link", "-s"]
+  devRefused(workspace, run, listing, "rust: cargo metadata failed in first/vendor/broken")
+  passed += [
+    devHeld(
+      "lint-roots: by default discovery fails on first/vendor/broken, a workspace that Cargo "
+        + "cannot load",
+    ),
+  ]
+
+  let narrowed = devConfigured(
+    workspace,
+    run,
+    "lint-roots",
+    "workspaceRoots = [\"**\", \"!first/vendor\"]\n",
+  )
+  devListed(narrowed, run, [], devLinks([first, second]))
+  passed += [
+    devHeld(
+      "lint-roots: under workspaceRoots = [\"**\", \"!first/vendor\"] discovery lists the "
+        + "workspaces first and second, and first/vendor/kept, a member below the directory left "
+        + "out, stays a package of first",
+    ),
+  ]
+
+  let only = devConfigured(workspace, run, "lint-roots", "workspaceRoots = [\"second\"]\n")
+  devListed(only, run, [], devLinks([second]))
+  devRefused(
+    only,
+    run,
+    devWorkspaceCall("first", ["workdir"]),
+    "rust: no Cargo workspace is rooted at first",
+  )
+  passed += [
+    devHeld(
+      "lint-roots: under workspaceRoots = [\"second\"] second is the only workspace, and first "
+        + "is not a workspace root",
+    ),
+  ]
+  passed
+}
+
+# The fmt lane: the `stale` check, what `dagger generate` writes and where,
+# and which packages an edit formats again.
+let devLintFmt(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "lint-fmt", "")
+  let tidy = ["check", "--check=stale", "--rust-package=crates/tidy"]
+  let messy = ["check", "--check=stale", "--rust-package=crates/messy"]
+  let inner = ["check", "--check=stale", "--rust-package=crates/messy/inner"]
+
+  devStdout(workspace, run, tidy)
+  devRefused(workspace, run, messy, devLintStale)
+  devRefused(workspace, run, inner, devLintStale)
+  passed += [
+    devHeld(
+      "lint-fmt: the stale check passes for crates/tidy, which is formatted to the rustfmt.toml "
+        + "above the workspace root, and fails for crates/messy and crates/messy/inner with \""
+        + devLintStale + "\"",
+    ),
+  ]
+
+  # The summary of the changes is the command's diagnostic output.
+  let summary = devPlain(devStderr(workspace, run, ["generate", "--no-apply", "-s"]))
+  let changed = devSorted(
+    devLines(summary).map { line => devWords(line).takeFirst(1).join("") }.filter { word =>
+      word.hasSuffix(".rs")
+    },
+  )
+  let expected = [
+    "crates/messy/inner/src/lib.rs",
+    "crates/messy/src/extra.rs",
+    "crates/messy/src/lib.rs",
+  ]
+  if (changed != expected) {
+    raise devCheckFailed(
+      "dagger generate --no-apply",
+      "would change " + devQuotedList(changed) + ", not " + devQuotedList(expected) + ":\n"
+        + summary,
+    )
+  }
+  passed += [
+    devHeld(
+      "lint-fmt: dagger generate would change crates/messy/src/lib.rs, the module file "
+        + "crates/messy/src/extra.rs and crates/messy/inner/src/lib.rs, at their repository paths, "
+        + "and no file of crates/tidy",
+    ),
+  ]
+
+  let package = "--rust-package=crates/messy"
+  let applied = devDagger(workspace, run, ["generate", "-y", "-s", package])
+  let smaller = "pub fn smaller(left: u64, right: u64) -> u64 {\n  if left < right {\n"
+  let doubled = "pub fn doubled(value: u64) -> u64 {\n  value * 2\n}\n"
+  let tripled = "pub fn tripled(value: u64)->u64 { value*3 }\n"
+  devEach([
+    {{file: "crates/messy/src/lib.rs", expected: smaller}},
+    {{file: "crates/messy/src/extra.rs", expected: doubled}},
+    {{file: "crates/messy/inner/src/lib.rs", expected: tripled}},
+  ]) { formatted =>
+    let contents = applied.file("/lint-fmt/" + formatted.file).contents rescue {
+      failed: GraphQLError => raise devStepFailure(failed)
+    }
+    if (contents.contains(formatted.expected) == false) {
+      raise devCheckFailed(
+        "dagger generate -y " + package,
+        "left " + formatted.file + " without " + devQuoted(formatted.expected) + ":\n" + contents,
+      )
+    }
+  }
+  devStdout(applied, run, messy)
+  devRefused(applied, run, inner, devLintStale)
+  passed += [
+    devHeld(
+      "lint-fmt: dagger generate --rust-package=crates/messy formats that package's two files "
+        + "in the repository, to the rustfmt.toml above the workspace root, and leaves "
+        + "crates/messy/inner alone; its stale check then passes and that of crates/messy/inner "
+        + "still fails",
+    ),
+  ]
+
+  let generate = ["generate", "--no-apply"]
+  let again = devLintTrace(workspace, run, generate)
+  devLintIdle("a second dagger generate", again, "cargo fmt")
+  let edited = workspace.withExec(
+    ["sed", "-i", "$ a // " + run.next, "/lint-fmt/crates/messy/inner/src/lib.rs"],
+  )
+  let after = devTraced(edited, run, generate)
+  let check = "dagger generate after an edit to crates/messy/inner"
+  devStateOf(check, after, "cargo fmt -p fmt-inner", "DONE")
+  devLintIdle(check, after, "cargo fmt -p fmt-messy")
+  devLintIdle(check, after, "cargo fmt -p fmt-tidy")
+  devLintAbsent(check, after, "cargo fetch")
+  passed += [
+    devHeld(
+      "lint-fmt: a second dagger generate runs no cargo fmt; after an edit to a file of "
+        + "crates/messy/inner, cargo fmt runs for that package and not for crates/messy, whose "
+        + "directory holds it, or for crates/tidy, and no cargo fetch runs",
+    ),
+  ]
+  passed
+}
+
+# The deny lane: when it applies, what it rejects, and which edits run
+# cargo-deny again.
+let devLintDeny(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "lint-deny", "")
+  let bare = ["check", "--check=deny", "--rust-workspace=bare"]
+  let clean = ["check", "--check=deny", "--rust-workspace=clean"]
+  let flagged = ["check", "--check=deny", "--rust-workspace=flagged"]
+  let command = "cargo deny --locked check --disable-fetch"
+
+  let first = devTraced(workspace, run, clean)
+  if (first.any { exec => exec.command.hasPrefix(command) } == false) {
+    raise devCheckFailed(
+      "the deny check of clean",
+      "did not run `" + command + "`:\n" + devDescribed(first),
+    )
+  }
+  let without = devLintTrace(workspace, run, bare)
+  devLintAbsent("the deny check of bare", without, "cargo deny")
+  passed += [
+    devHeld(
+      "lint-deny: the deny check of clean, which has a deny.toml, passes on `" + command
+        + "`, and that of bare, which has none, passes without running cargo-deny",
+    ),
+  ]
+
+  devEach(["rust: cargo deny check failed in flagged:", "RUSTSEC-2020-0095"]) { reason =>
+    devRefused(workspace, run, flagged, reason)
+  }
+  passed += [
+    devHeld(
+      "lint-deny: the deny check of flagged fails with \"rust: cargo deny check failed in "
+        + "flagged:\" and the advisory RUSTSEC-2020-0095 of its dependency, read from the advisory "
+        + "database",
+    ),
+  ]
+
+  let again = devTraced(workspace, run, clean)
+  devStateOf("a second deny check of clean", again, command, "CACHED")
+  let edited = workspace.withExec(
+    ["sed", "-i", "$ a // " + run.next, "/lint-deny/clean/src/lib.rs"],
+  )
+  devStateOf(
+    "the deny check of clean after an edit to a Rust file",
+    devTraced(edited, run, clean),
+    command,
+    "CACHED",
+  )
+  let policy = edited.withExec(["sed", "-i", "$ a # " + run.next, "/lint-deny/clean/deny.toml"])
+  let after = devTraced(policy, run, clean)
+  let check = "the deny check of clean after an edit to deny.toml"
+  devStateOf(check, after, command, "DONE")
+  devStateOf(check, after, "cargo fetch --locked", "CACHED")
+  passed += [
+    devHeld(
+      "lint-deny: a second deny check, and one after an edit to a Rust file, re-execute no "
+        + "cargo deny; after an edit to deny.toml cargo deny runs again and cargo fetch does not",
+    ),
+  ]
+  passed
+}
+
+# Runs `dagger <args>` with its full trace, and returns the container commands
+# of the module's steps, which may be none: the engine answers a function it
+# has run over the same inputs without naming its steps again.
+let devLintTrace(workspace: Container!, run: DevRun!, args: [String!]!): [DevExec!]! {
+  let command = ["--progress=plain", "-vvv"] + args
+  let trace = devStderr(workspace, run, command)
+  let execs = devExecs(trace)
+  if (execs.any { exec => exec.state == "" }) {
+    raise devCheckFailed(
+      "dagger " + command.join(" "),
+      "traced a container command without a state:\n" + devDescribed(execs) + "\n"
+        + devTail(trace),
+    )
+  }
+  execs
+}
+
+# Checks that no step running `command` ran: each was answered from the cache,
+# or was not reached.
+let devLintIdle(check: String!, execs: [DevExec!]!, command: String!): Void {
+  if (execs.any { exec => exec.command.hasPrefix(command) and exec.state != "CACHED" }) {
+    raise devCheckFailed(
+      check,
+      "expected no `" + command + "` to run, but traced\n" + devDescribed(execs),
+    )
+  }
+  null
+}
+
+# Checks that the trace names no step running `command`.
+let devLintAbsent(check: String!, execs: [DevExec!]!, command: String!): Void {
+  if (execs.any { exec => exec.command.hasPrefix(command) }) {
+    raise devCheckFailed(
+      check,
+      "expected no `" + command + "` step, but traced\n" + devDescribed(execs),
+    )
+  }
+  null
+}

@@ -1,0 +1,293 @@
+# The recipe, and the dependency layer's check flavour: the workspace's
+# dependencies compiled in metadata-only mode, without the workspace's own
+# members. The check, clippy and doc lanes start from it.
+#
+#   recipe        what Cargo needs to resolve the workspace and to compile its
+#                 dependencies, and nothing that a source edit or a release
+#                 bump changes: the members' manifests with their versions
+#                 masked, the lockfile, the Cargo configuration and a stub in
+#                 place of each target's source. cargo-chef writes it. It is
+#                 the workspace's one stub tree: the fetch layer and both
+#                 flavours of the dependency layer run over it.
+#   dependencies  `cargo check` over the recipe, once for each shape of
+#                 command a lane runs, into a target directory in the step's
+#                 own filesystem. What Cargo compiled of the stubs is then
+#                 removed, so that only dependencies are left.
+#
+# The crates come from the workspace's fetch layer, `RustWorkspace.fetchedOf`,
+# which is `cargo fetch` over the recipe. The test flavour of the dependency
+# layer is in lane-test-dependencies.dang.
+#
+# Every step is keyed on what the recipe says, on the toolchain layer and on
+# the settings that change compilation. None reads a source file, and none
+# mounts a cache volume.
+
+# cargo-chef, pinned by version and by the checksum of its release archive
+# for each platform. Its binaries are statically linked.
+let rustDependenciesChefRelease: String! = "https://github.com/LukeMathWalker/cargo-chef/releases/download/v0.1.78"
+
+# Where the dependencies are compiled, and where a lane's Cargo commands
+# find them. It is outside the mount path, so the source mounted there hides
+# nothing, and it is the same in every engine. The test flavour's,
+# rustTestTargetDir, is beside it.
+let rustDependenciesTarget: String! = "/var/cache/rust/target-check"
+
+# Where the recipe's document sits while cargo-chef writes or reads it.
+let rustDependenciesRecipeFile: String! = "/tmp/rust-dependencies-recipe.json"
+
+# cargo-chef's binary for the engine's platform. The engine verifies the
+# archive's checksum before a container sees it.
+let rustDependenciesChef(tool: Rust!): File! {
+  let platform = `${defaultPlatform}`.split("/").takeFirst(2).join("/")
+  let archive = if (platform == "linux/amd64") {
+    http(
+      rustDependenciesChefRelease + "/cargo-chef-x86_64-unknown-linux-musl.tar.xz",
+      checksum: "sha256:aca691abfbfbbe00d482e0ed2249eec3091b65e96a0ce92947fb5b254d48b16d",
+    )
+  } else if (platform == "linux/arm64") {
+    http(
+      rustDependenciesChefRelease + "/cargo-chef-aarch64-unknown-linux-musl.tar.xz",
+      checksum: "sha256:cd59b90fce5fa84c4189648fec33404ec5491791eebdb812df5e7fca8336408d",
+    )
+  } else {
+    raise "rust: no pinned cargo-chef for " + platform
+  }
+  rustImage(tool)
+    .withMountedFile("/tmp/cargo-chef.tar.xz", archive)
+    .withDirectory("/opt/cargo-chef", directory)
+    .withExec(["tar", "-xJf", "/tmp/cargo-chef.tar.xz", "-C", "/opt/cargo-chef", "--strip-components=1"])
+    .file("/opt/cargo-chef/cargo-chef")
+}
+
+# The recipe as cargo-chef writes it: one JSON document that holds each
+# member's manifest, the lockfile and the workspace root's Cargo
+# configuration. cargo-chef names every target in the manifests, masks the
+# members' versions there and in the lockfile, and drops the lint tables,
+# which stubs would not pass.
+#
+# The step that writes it runs again whenever a manifest changes. Its result
+# is read here as text, so a step built from that text is keyed on what the
+# recipe says, and stays cached when a manifest edit leaves the recipe as it
+# was.
+let rustDependenciesPrepared(workspace: RustWorkspace!, inputs: RustInputs!): String! {
+  workspace
+    .toolchainOf(inputs, [])
+    .withMountedFile("/usr/local/bin/cargo-chef", rustDependenciesChef(workspace.tool))
+    .withMountedDirectory(workspace.mountPath, workspace.skeletonOf(inputs))
+    .withExec(["cargo", "chef", "prepare", "--recipe-path", rustDependenciesRecipeFile])
+    .file(rustDependenciesRecipeFile)
+    .contents
+}
+
+# The recipe as a directory rooted at the repository root, which Cargo can
+# load, resolve and compile. cargo-chef restores the workspace from its
+# document, with a stub that compiles in place of each target's source.
+#
+# cargo-chef knows the workspace's members and the root's configuration
+# only. The other files Cargo may read are added as they are: Cargo
+# configuration above the root, and the manifests of packages that are not
+# members, with an empty file for each of their conventional target paths
+# and an empty `main` for each build script.
+let rustDependenciesRecipe(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
+  let document = rustDependenciesPrepared(workspace, inputs)
+  let recipe = JSON.decode(document) :: {{skeleton: {{manifests: [{{relative_path: String!}}!]!}}!}}!
+  let restored = recipe.skeleton.manifests.map { manifest =>
+    rustPathIn(workspace.path, manifest.relative_path)
+  }
+  let others = inputs.manifests.filter(exclude: restored + [rustPathIn(workspace.path, "Cargo.lock")])
+  let outside = others
+    .glob("**/Cargo.toml")
+    .filter { file => file.hasSuffix("/") == false }
+    .map { file => rustParent(file) }
+  let targets = inputs.targets.filter { file =>
+    outside.any { dir => rustUnder(file, dir) }
+  }
+  let scripts = targets.filter { file => file == "build.rs" or file.hasSuffix("/build.rs") }
+  rustImage(workspace.tool)
+    .withMountedFile("/usr/local/bin/cargo-chef", rustDependenciesChef(workspace.tool))
+    .withNewFile(rustDependenciesRecipeFile, document)
+    .withDirectory("/recipe", others)
+    .withNewFile("/tmp/rust-dependencies/dirs", rustLines(targets.map { file => rustParent(file) }.uniq))
+    .withNewFile("/tmp/rust-dependencies/files", rustLines(targets))
+    .withNewFile("/tmp/rust-dependencies/scripts", rustLines(scripts))
+    .withNewFile("/tmp/rust-dependencies/build.rs", "fn main() {}\n")
+    .withWorkdir("/recipe")
+    .withExec(["xargs", "-r", "-d", "\n", "-a", "/tmp/rust-dependencies/dirs", "mkdir", "-p", "--"])
+    .withExec(["xargs", "-r", "-d", "\n", "-a", "/tmp/rust-dependencies/files", "touch", "--"])
+    .withExec([
+      "xargs", "-r", "-d", "\n", "-n", "1", "-a", "/tmp/rust-dependencies/scripts",
+      "cp", "--", "/tmp/rust-dependencies/build.rs",
+    ])
+    .withDirectory(rustPathIn("/recipe", workspace.path), directory)
+    .withWorkdir(rustPathIn("/recipe", workspace.path))
+    .withExec(["cargo-chef", "chef", "cook", "--no-build", "--recipe-path", rustDependenciesRecipeFile])
+    .directory("/recipe")
+}
+
+# Container path of the lockfile that Cargo commands of a workspace use.
+let rustDependenciesLock(workspace: RustWorkspace!): String! {
+  rustPathIn(workspace.workdir, "Cargo.lock")
+}
+
+# The packages a lockfile takes from a path, each as the specification
+# `name@version` that `cargo -p` takes: the workspace's members, and the
+# packages they depend on by path. Cargo writes one entry for each package,
+# and gives a `source` to those that come from a registry or from git.
+#
+# Both flavours of the dependency layer clean these packages, and each reads
+# the lockfile it compiled with: the recipe's, in which cargo-chef has masked
+# the members' versions, or with locked off the one the fetch resolved over
+# the recipe. The source's own lockfile names other versions.
+let rustDependenciesLocal(lock: String!): [String!]! {
+  let none: [{{name: String!, version: String!, source: String}}!]! = []
+  let locked = TOML.decode(lock) :: {{package: [{{name: String!, version: String!, source: String}}!]}}!
+  (locked.package ?? none)
+    .filter { entry => entry.source == null }
+    .map { entry => entry.name + "@" + entry.version }
+    .uniq
+}
+
+# The flags of the settings that are not about features: --locked, --profile
+# and --target.
+let rustDependenciesFlags(tool: Rust!): [String!]! {
+  let none: [String!]! = []
+  (if (tool.locked) { ["--locked"] } else { none })
+    + (if (tool.buildProfile == null) { none } else { ["--profile", tool.buildProfile ?? ""] })
+    + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
+}
+
+# The dependency layer, check flavour: the fetch layer, which has the recipe
+# mounted, with the workspace's dependencies compiled by `cargo check` into
+# the target directory.
+#
+# Cargo compiles a dependency once for each set of features it is used with,
+# and which set that is depends on the command. So the layer runs `cargo
+# check` over the recipe in each shape a lane will run it:
+#
+#   --workspace --all-targets   what clippy compiles: dev-dependencies too
+#   --workspace                 what rustdoc needs
+#   --workspace <set>           each feature set a lane adds, in `sets`
+#
+# each under the settings' other flags. A later shape compiles only what an
+# earlier one did not.
+#
+# The stubs compile too, and Cargo judges by modification time whether a
+# package it takes from a path is up to date. Left in place, a stub's
+# artifact could pass for a member's whose source is older than this layer.
+# `cargo clean -p` therefore removes what was compiled of every package that
+# the lockfile the shapes compiled with takes from a path.
+#
+# A failed step is not kept, so a build that was killed runs again next
+# time. Cargo's output is in the step's own log.
+let rustDependenciesLayer(
+  workspace: RustWorkspace!,
+  inputs: RustInputs!,
+  sets: [[String!]!]!,
+): Container! {
+  let tool = workspace.tool
+  let none: [String!]! = []
+  let check = ["cargo", "check", "--workspace"]
+  let shapes = [check + ["--all-targets"] + tool.cargoFlags, check + tool.cargoFlags]
+    + sets.map { set => check + rustDependenciesFlags(tool) + set }
+  let shaped = shapes.reduce(
+    workspace
+      .fetchedOf(inputs)
+      .withEnvVariable("CARGO_NET_OFFLINE", "true")
+      .withEnvVariable("CARGO_TARGET_DIR", rustDependenciesTarget),
+  ) { ctr, shape => ctr.withExec(shape) }
+  let compiled = shaped.sync rescue {
+    err: Error => raise "rust: the dependencies of the workspace " + workspace.path
+      + " did not compile (" + err.message + "); the failed step's log has Cargo's output"
+  }
+  let local = rustDependenciesLocal(compiled.file(rustDependenciesLock(workspace)).contents)
+  # cargo clean removes a package's artifacts for one profile and one
+  # target: those the shapes compiled for.
+  compiled.withExec(
+    ["cargo", "clean"]
+      + (if (tool.buildProfile == null) { none } else { ["--profile", tool.buildProfile ?? ""] })
+      + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
+      + local.reduce(none) { flags, package => flags + ["-p", package] },
+  ).sync rescue {
+    err: Error => raise "rust: the dependencies of the workspace " + workspace.path
+      + " could not be cleaned of its own packages (" + err.message
+      + "); the failed step's log has Cargo's output"
+  }
+}
+
+# The container of a check, clippy or doc lane: the toolchain layer with the
+# components the lane asks for and the fetch layer's crates in Cargo's home,
+# as a compile lane's container. Its target directory is the lane's own
+# volume, which starts from the target directory of `dependencies`; its
+# source is the lane's mirror at the mount path. compile.dang has both.
+#
+# `marks` is what the lane's command covers that Cargo cannot tell, or "".
+# It is written into the directory the volume starts from, so a lane with
+# other marks gets another volume.
+let rustDependenciesLane(
+  workspace: RustWorkspace!,
+  inputs: RustInputs!,
+  lane: String!,
+  components: [String!]!,
+  dependencies: Container!,
+  marks: String!,
+): Container! {
+  let toolchain = workspace.withCrates(inputs, workspace.toolchainOf(inputs, components))
+  if (marks == "") {
+    rustCompileLane(
+      workspace,
+      inputs,
+      lane,
+      toolchain,
+      rustDependenciesTarget,
+      dependencies.directory(rustDependenciesTarget),
+    )
+  } else {
+    rustCompileLane(
+      workspace,
+      inputs,
+      lane,
+      toolchain.withNewFile(rustCompileMarked, marks),
+      rustDependenciesTarget,
+      dependencies
+        .withNewFile(rustDependenciesTarget + "/" + rustCompileMarks, marks)
+        .directory(rustDependenciesTarget),
+    )
+  }
+}
+
+# Runs a step with `expect: ANY`, and returns the container to read its exit
+# code and stderr from. Its stdout is in the file `output`, unless `output`
+# is "". `arguments` is what runs, and `command` the Cargo command in it,
+# for a message.
+#
+# With `expect: ANY`, Cargo failing is a result the lane can read. The
+# engine keeps that result, which is right when the source is at fault: the
+# same source fails the same way. It is wrong when a signal stopped a
+# compiler or a build script, as the kernel does to a process that runs out
+# of memory, and when the helper of a compile lane failed. Cargo and the
+# helper then say so, and the step runs once more as one that must succeed.
+# If it does, that is the result. If it does not, the engine does not keep
+# the failure, and the next run tries again.
+let rustDependenciesRan(
+  lane: Container!,
+  arguments: [String!]!,
+  output: String!,
+  command: [String!]!,
+): Container! {
+  let ran = lane.withExec(arguments, expect: ANY, redirectStdout: output)
+  if (ran.exitCode != 0 and (ran.stderr.contains("(signal: ") or ran.exitCode == rustCompileFailed)) {
+    lane.withExec(arguments, redirectStdout: output).sync rescue {
+      err: Error => raise "rust: `" + command.join(" ") + "` did not run to its end, and failed again ("
+        + err.message + ") when run once more:\n" + ran.stderr
+    }
+  } else {
+    ran
+  }
+}
+
+# Runs a Cargo command as rustDependenciesRan does: the command of a
+# dependency layer, which mounts no volume. A compile lane runs its command
+# with rustCompileCargo.
+let rustDependenciesCargo(lane: Container!, command: [String!]!, output: String!): Container! {
+  rustDependenciesRan(lane, command, output, command)
+}

@@ -1,0 +1,582 @@
+# The harness of the acceptance: what every file of the dev module uses.
+#
+# - A check's run: the pinned CLI, the repository's files, and `next`, a value
+#   that is new on every read.
+# - Fixtures, each as a repository of its own that installs the module.
+# - `dagger` commands as new sessions of this engine: those that must succeed,
+#   those that must fail, and their traces.
+# - Assertions. A function that checks something raises
+#   `devCheckFailed(what, detail)` when it does not hold. A command that must
+#   fail runs with `expect: FAILURE`, so its output is read whole, and `rescue`
+#   turns the engine's error for one that succeeded into the assertion's
+#   message. A group of assertions returns the message of each one that held,
+#   through `devHeld`.
+#
+# A directory of Dang files is one module, so these top-level functions are
+# visible from every file; `let` keeps them out of the module's API. Every
+# top-level name starts with `dev` or `Dev`, and one that belongs to a single
+# file with that file's name too: `devBuildClippy`, `devCacheMounts`.
+
+# The image the acceptance's commands run in: the module's own default, so that
+# one pull serves both. It has git, which a Dagger workspace needs.
+let devToolsImage: String! = "rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea"
+
+# The release of the CLI that drives the module: the one the module declares
+# as its engineVersion.
+let devDaggerVersion: String! = "1.0.0-beta.27"
+
+# How much of a failed step's output an error keeps, from the end, in
+# characters.
+let devOutputTail: Int! = 16384
+
+# Where the module's source sits in the acceptance's containers.
+let devModulePath: String! = "/rust"
+
+# The helper that a compile lane's Cargo command runs under, in the lane's
+# container.
+let devHelper: String! = "/usr/local/bin/rust-lane-helper"
+
+# The checks of the module, each with whether it belongs to a package rather
+# than a workspace.
+let devChecks: [{{name: String!, ofPackage: Boolean!}}!]! = [
+  {{name: "check", ofPackage: false}},
+  {{name: "clippy", ofPackage: true}},
+  {{name: "deny", ofPackage: false}},
+  {{name: "doc", ofPackage: false}},
+  {{name: "stale", ofPackage: true}},
+  {{name: "test", ofPackage: true}},
+]
+
+# One run of a check: what its assertions start from, and what makes each
+# `dagger` command of the run a step of its own. The engine caches a step by
+# its inputs, so a command repeated over unchanged files would otherwise
+# answer from the cache without running.
+type DevRun {
+  # The check, as `dagger check` names it. It starts the name of every cache
+  # volume the check's commands mount, and every value of the run.
+  let check: String!
+
+  # A container with git, the pinned CLI and the module's source.
+  let cli: Container!
+
+  # The module's source, its helper and the fixtures.
+  let source: Directory!
+
+  # A value no other command of this run, of another run, or of another check
+  # has: the check's name, and 26 random characters that are new on every
+  # read.
+  let next: String! {
+    check + "-" + Random.string
+  }
+}
+
+# What every check starts from: a container with the pinned CLI and the
+# module's source, and the check's run. It reads the repository from the
+# workspace, as the module does, through a view keyed on the files it holds:
+# a local workspace's, without what .gitignore leaves out, or those of the
+# commit that a workspace was loaded from.
+let devBegin(ws: Workspace!, check: String!): DevRun! {
+  let source = ws.directory(
+    "/",
+    include: ["*.dang", "dagger-module.toml", "fixtures/**", "helper/**"],
+    gitignore: true,
+  )
+  let platform = `${defaultPlatform}`
+  print(`${check} on engine ${version} (${platform})`)
+  DevRun(
+    check: check,
+    cli: devDaggerCli(platform).withDirectory(
+      devModulePath,
+      source.withoutDirectory("fixtures"),
+    ),
+    source: source,
+  )
+}
+
+# Says that a check passed, with the number of its assertions, for whoever
+# reads its log.
+let devPassed(run: DevRun!, passed: [String!]!): Void {
+  print(`${run.check}: ${passed.length} assertions held`)
+  null
+}
+
+# An assertion that held. It is printed when it holds, so that the log of a
+# check that fails later says how far it got. Nothing reads the lines back,
+# and the engine may drop them: a check's verdict is its result alone.
+let devHeld(assertion: String!): String! {
+  print(assertion)
+  assertion
+}
+
+# Calls `block` with each item, in order. An error raised in the block keeps
+# its message: `.each` would put `each block: ` before it.
+let devEach(items: [a!]!, &block(item: a!): b): Void {
+  let index = 0
+  loop {
+    if (index >= items.length) {
+      break
+    }
+    block(items[index]!)
+    index += 1
+  }
+  null
+}
+
+# The release archive of the pinned CLI for a platform. The engine verifies
+# the checksum before the archive reaches a container.
+let devDaggerArchive(platform: String!): File! {
+  let release = "https://dl.dagger.io/dagger/releases/" + devDaggerVersion + "/dagger_v"
+    + devDaggerVersion + "_"
+  if (platform == "linux/amd64") {
+    http(
+      release + "linux_amd64.tar.gz",
+      checksum: "sha256:de2a3ca569c3a955d5ce98d2c4879b67a4459c394a7e1684261ba7152bdb6865",
+    )
+  } else if (platform == "linux/arm64") {
+    http(
+      release + "linux_arm64.tar.gz",
+      checksum: "sha256:1ef003a4522d4f39c862d6dd360bc2916a605f87aad3dce4988c01f4bcd73358",
+    )
+  } else {
+    raise "no pinned Dagger CLI for " + platform
+  }
+}
+
+# A container with git and the pinned CLI, for the `dagger` commands that a
+# check runs as new sessions of this engine.
+let devDaggerCli(platform: String!): Container! {
+  container
+    .from(devToolsImage)
+    .withMountedFile("/tmp/dagger.tar.gz", devDaggerArchive(platform))
+    .withExec(["tar", "-xzf", "/tmp/dagger.tar.gz", "-C", "/usr/local/bin", "dagger"])
+    .withEnvVariable("DAGGER_NO_NAG", "1")
+}
+
+# A repository at `/<name>` that holds the fixture `name` and installs the
+# module with `settings`, the body of its `[modules.rust.settings]` table, as
+# devConfigured does. A Dagger workspace is a Git repository, and the module
+# names the workspace for its directory.
+let devConsumer(run: DevRun!, name: String!, settings: String!): Container! {
+  devConfigured(devRepository(run, name, name), run, name, settings)
+}
+
+# The fixture `fixture` as a Git repository at `/<name>`, with no
+# `dagger.toml` yet.
+let devRepository(run: DevRun!, fixture: String!, name: String!): Container! {
+  let root = "/" + name
+  run
+    .cli
+    .withDirectory(root, run.source.directory("fixtures/" + fixture))
+    .withWorkdir(root)
+    .withExec(["git", "init", "--quiet", "."])
+}
+
+# The fixture repository `name` with the module's settings replaced by
+# `settings`, and a `volumePrefix` of this check's own unless `settings` has
+# one: `<check>-<name>`. Two checks run the same lane over the same fixture,
+# and with a prefix each they never mount the same cache volume: neither finds
+# the other's build, or waits for its lock.
+let devConfigured(
+  workspace: Container!,
+  run: DevRun!,
+  name: String!,
+  settings: String!,
+): Container! {
+  if (settings.contains("volumePrefix")) {
+    devInstalled(workspace, name, settings)
+  } else {
+    devInstalled(workspace, name, "volumePrefix = \"" + run.check + "-" + name + "\"\n" + settings)
+  }
+}
+
+# The fixture repository `name` with the module installed under exactly
+# `settings`, and so with the volume prefix the module derives when `settings`
+# has none. It is for reading what the module derives. A command that mounts a
+# cache volume from it must run in a repository whose name no other check
+# uses: see devRenamed.
+let devInstalled(workspace: Container!, name: String!, settings: String!): Container! {
+  let module = "[modules.rust]\nsource = \".." + devModulePath + "\"\n"
+  let config = if (settings == "") { module } else {
+    module + "\n[modules.rust.settings]\n" + settings
+  }
+  workspace.withNewFile("/" + name + "/dagger.toml", config)
+}
+
+# The fixture `fixture` as a repository of another name, with the module
+# installed under no settings. The module names the workspace, its mount path
+# and its cache volumes for the repository, so a check that mounts volumes
+# under their default names takes a repository name of its own.
+let devRenamed(run: DevRun!, fixture: String!, name: String!): Container! {
+  devInstalled(devRepository(run, fixture, name), name, "")
+}
+
+# The arguments of `dagger call` for a function of the workspace rooted at
+# `root`.
+let devWorkspaceCall(root: String!, function: [String!]!): [String!]! {
+  ["call", "rust", "workspace", "--path", root] + function
+}
+
+# The links `dagger check -l --all -f=link` prints for workspaces and their
+# packages.
+let devLinks(workspaces: [{{root: String!, packages: [String!]!}}!]!): [String!]! {
+  let none: [String!]! = []
+  devChecks.reduce(none) { links, check =>
+    workspaces.reduce(links) { found, workspace =>
+      let link = "dag+check://?check=" + check.name + "&rust-workspace=" + workspace.root
+      if (check.ofPackage) {
+        found + workspace.packages.map { package => link + "&rust-package=" + package }
+      } else {
+        found + [link]
+      }
+    }
+  }
+}
+
+# Checks that `dagger check -l --all`, narrowed by `filters`, lists exactly
+# `expected`.
+let devListed(
+  workspace: Container!,
+  run: DevRun!,
+  filters: [String!]!,
+  expected: [String!]!,
+): Void {
+  let command = ["check", "-l", "--all", "-f=link", "-s"] + filters
+  devSameLines(
+    "dagger " + command.join(" "),
+    devStdout(workspace, run, command),
+    expected,
+  )
+}
+
+# Checks that a listing's lines are exactly `expected`, in any order.
+let devSameLines(check: String!, output: String!, expected: [String!]!): Void {
+  let found = devSorted(
+    devLines(output).filter { line => line != "" and line.hasPrefix("#") == false },
+  )
+  let wanted = devSorted(expected)
+  if (found != wanted) {
+    raise devCheckFailed(check, "listed\n" + found.join("\n") + "\nnot\n" + wanted.join("\n"))
+  }
+  null
+}
+
+# Runs `dagger <args>` connected to this engine as a new session, as a step
+# that no earlier command can answer for. `expect` says how the command must
+# end: the engine raises when it ends otherwise.
+let devDagger(
+  workspace: Container!,
+  run: DevRun!,
+  args: [String!]!,
+  expect: ReturnType! = SUCCESS,
+): Container! {
+  workspace
+    .withEnvVariable("ACCEPTANCE_COMMAND", run.next)
+    .withExec(["dagger"] + args, daggerInDaggerNewSession: true, expect: expect)
+}
+
+# Runs `dagger <args>`, which must succeed, and returns what it prints.
+let devStdout(workspace: Container!, run: DevRun!, args: [String!]!): String! {
+  devDagger(workspace, run, args).stdout rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+}
+
+# Runs `dagger <args>`, which must succeed, and returns its diagnostic output.
+let devStderr(workspace: Container!, run: DevRun!, args: [String!]!): String! {
+  devDagger(workspace, run, args).stderr rescue {
+    failed: GraphQLError => raise devStepFailure(failed)
+  }
+}
+
+# Runs `dagger <args>` and checks the words it prints.
+let devPrints(
+  workspace: Container!,
+  run: DevRun!,
+  args: [String!]!,
+  expected: [String!]!,
+): Void {
+  let output = devStdout(workspace, run, args)
+  if (devWords(output) != expected) {
+    raise devCheckFailed(
+      "dagger " + args.join(" "),
+      "printed " + devQuoted(output) + ", not " + devQuotedList(expected),
+    )
+  }
+  null
+}
+
+# Runs `dagger <args>`, which must fail, and returns what it prints. The
+# command is expected to fail, so the engine raises when it succeeds, and
+# `rescue` gives that the assertion's message.
+let devFailing(workspace: Container!, run: DevRun!, args: [String!]!): String! {
+  devDagger(workspace, run, args, FAILURE).combinedOutput rescue {
+    failed: GraphQLError => raise devUnexpected("dagger " + args.join(" "), failed)
+  }
+}
+
+# Runs `dagger <args>`, which must fail and say `reason`.
+let devRefused(
+  workspace: Container!,
+  run: DevRun!,
+  args: [String!]!,
+  reason: String!,
+): Void {
+  let output = devFailing(workspace, run, args)
+  if (output.contains(reason) == false) {
+    raise devCheckFailed(
+      "dagger " + args.join(" "),
+      "failed without saying " + devQuoted(reason) + ":\n" + devTail(output),
+    )
+  }
+  null
+}
+
+# Checks that `output` holds `text`.
+let devSays(check: String!, output: String!, text: String!): Void {
+  if (output.contains(text) == false) {
+    raise devCheckFailed(check, "did not say " + devQuoted(text) + ":\n" + devTail(output))
+  }
+  null
+}
+
+# Checks that `output` does not hold `text`.
+let devSilent(check: String!, output: String!, text: String!): Void {
+  if (output.contains(text)) {
+    raise devCheckFailed(check, "said " + devQuoted(text) + ":\n" + devTail(output))
+  }
+  null
+}
+
+# A container command that a `dagger` command's trace reports, and how it
+# ended: `DONE` when it ran, `CACHED` when the engine already had its result.
+#
+# A compile lane runs its Cargo command under the helper, which syncs the
+# lane's mirror first. `command` is then the Cargo command, and `helper` says
+# so. `step` is the number the trace gives the step.
+type DevExec {
+  let step: String!
+  let command: String!
+  let state: String!
+  let helper: Boolean!
+}
+
+# Runs `dagger <args>` with its full trace, and returns the container commands
+# of the module's steps. The trace gives each step under one number: the call,
+# as `Container.withExec(args: [...])` or `withExec <command>`, or over
+# several lines with one for `args: [...]`, then `Container.withExec` with the
+# state.
+let devTraced(workspace: Container!, run: DevRun!, args: [String!]!): [DevExec!]! {
+  let command = ["--progress=plain", "-vvv"] + args
+  let trace = devStderr(workspace, run, command)
+  let execs = devExecs(trace)
+  if (execs.length == 0 or execs.any { exec => exec.state == "" }) {
+    raise devCheckFailed(
+      "dagger " + command.join(" "),
+      "traced no container command, or one without a state:\n" + devDescribed(execs) + "\n"
+        + devTail(trace),
+    )
+  }
+  execs
+}
+
+# Runs `dagger <args>`, which must succeed, with its full trace, and returns
+# the container commands of the module's steps, which may be none.
+let devSteps(workspace: Container!, run: DevRun!, args: [String!]!): [DevExec!]! {
+  devExecs(devStderr(workspace, run, ["--progress=plain", "-vvv"] + args))
+}
+
+# The container commands in a plain trace, in the order the trace first names
+# them.
+let devExecs(trace: String!): [DevExec!]! {
+  let execs: [DevExec!]! = []
+  # The steps whose call the trace is listing over several lines.
+  let listing: [String!]! = []
+  devLines(devPlain(trace)).each { line =>
+    let parts = line.split(":", limit: 2)
+    if (parts.length < 2) {
+      continue
+    }
+    let step = parts[0]!.trimSpace
+    let rest = parts[1]!.trimLeft("┆ ")
+    if (rest == "Container.withExec(") {
+      listing += [step]
+      continue
+    }
+    # The arguments are quoted and separated by commas: `"cargo", "fetch"`.
+    let called: String = if (rest.hasPrefix("Container.withExec(args: [")) {
+      devCommand(
+        rest.trimPrefix("Container.withExec(args: [").split("])").takeFirst(1).join(""),
+      )
+    } else if (rest.hasPrefix("args: [") and listing.contains(step)) {
+      devCommand(devTrimEnd(rest.trimPrefix("args: [")).trimRight("]"))
+    } else if (rest.hasPrefix("withExec ")) {
+      rest.trimPrefix("withExec ").trimSpace
+    } else {
+      null
+    }
+    if (called != null) {
+      # A step that runs is named again when it prints its output.
+      if (execs.any { exec => exec.step == step } == false) {
+        # The helper's own arguments end with `--`, and the command follows.
+        let wrapped = called.trimPrefix(devHelper).split(" -- ", limit: 2)
+        if (called.hasPrefix(devHelper) and wrapped.length == 2) {
+          execs += [DevExec(step, wrapped[1]!, "", true)]
+        } else {
+          execs += [DevExec(step, called, "", false)]
+        }
+      }
+    } else if (rest.hasPrefix("Container.withExec ")) {
+      let state = devWords(rest.trimPrefix("Container.withExec ")).takeFirst(1).join("")
+      execs = execs.map { exec =>
+        if (exec.step == step) { DevExec(exec.step, exec.command, state, exec.helper) } else {
+          exec
+        }
+      }
+    }
+  }
+  execs
+}
+
+# A command as a trace's argument list gives it: `"cargo", "fetch"` is
+# `cargo fetch`.
+let devCommand(arguments: String!): String! {
+  arguments.replace("\", \"", " ").trim("\"")
+}
+
+# Checks that every step was answered from the cache, and that there were at
+# least `steps` of them, so that a trace that lost its steps does not pass.
+let devAllCached(check: String!, execs: [DevExec!]!, steps: Int!): Void {
+  if (execs.length < steps or execs.any { exec => exec.state != "CACHED" }) {
+    raise devCheckFailed(
+      check,
+      `expected at least ${steps} steps, all CACHED, but traced` + "\n" + devDescribed(execs),
+    )
+  }
+  null
+}
+
+# Checks that steps running `command` exist and all ended in `state`.
+let devStateOf(
+  check: String!,
+  execs: [DevExec!]!,
+  command: String!,
+  state: String!,
+): Void {
+  let matching = execs.filter { exec => exec.command.hasPrefix(command) }
+  if (matching.length == 0 or matching.any { exec => exec.state != state }) {
+    raise devCheckFailed(
+      check,
+      "expected `" + command + "` to be " + state + ", but traced\n" + devDescribed(execs),
+    )
+  }
+  null
+}
+
+# One line for each traced command, with its state.
+let devDescribed(execs: [DevExec!]!): String! {
+  execs.map { exec => "  " + exec.state + " " + exec.command }.join("\n")
+}
+
+# An assertion that ran but did not hold: what a check raises.
+let devCheckFailed(check: String!, detail: String!): String! {
+  check + ": " + detail
+}
+
+# What a failed step's extensions say of it. The engine gives each of the
+# step's outputs from its end, up to 100 KiB.
+let devStep(failed: GraphQLError!): {{cmd: [String!], exitCode: Int, stdout: String, stderr: String}}! {
+  JSON.decode(failed.extensions)
+}
+
+# Reports a failed step with its command, exit code, and the end of its
+# output, so that the message alone says what failed. Any other failure of the
+# engine is reported as the engine words it.
+let devStepFailure(failed: GraphQLError!): String! {
+  let step = devStep(failed)
+  let code = step.exitCode
+  if (step.cmd == null or code == null) {
+    failed.message
+  } else {
+    (step.cmd ?? []).join(" ") + ` failed with exit code ${code}` + "\n" + devTail(step.stdout ?? "")
+      + "\n" + devTail(step.stderr ?? "")
+  }
+}
+
+# Reports a command that had to fail: one that succeeded, with what it
+# printed, and any other as devStepFailure does.
+let devUnexpected(check: String!, failed: GraphQLError!): String! {
+  let step = devStep(failed)
+  if (step.exitCode == 0) {
+    devCheckFailed(check, "succeeded, but must fail:\n" + devTail(step.stdout ?? ""))
+  } else {
+    devStepFailure(failed)
+  }
+}
+
+# The end of `output`: its last lines, as many as fit in `devOutputTail`
+# characters, or the end of its last line when that line alone is longer.
+let devTail(output: String!): String! {
+  if (output.length <= devOutputTail) {
+    return output
+  }
+  let lines = output.split("\n")
+  let first = lines.length
+  let room = devOutputTail
+  loop {
+    if (first == 0) {
+      break
+    }
+    let size = lines[first - 1]!.length + 1
+    if (size > room) {
+      break
+    }
+    room = room - size
+    first = first - 1
+  }
+  if (first == lines.length) {
+    lines[first - 1]!.split("").takeLast(devOutputTail).join("")
+  } else {
+    lines.dropFirst(first).join("\n")
+  }
+}
+
+# What a command printed, without its terminal colour sequences: each runs
+# from the escape to its final letter, within a line.
+let devPlain(output: String!): String! {
+  output.replaceMatches(`\x1b[^A-Za-z\n]*[A-Za-z]?`, "")
+}
+
+# The lines of a command's output, each without its line ending.
+let devLines(output: String!): [String!]! {
+  output.split("\n").map { line => line.trimSuffix("\r") }
+}
+
+# The words of a text: what whitespace separates.
+let devWords(text: String!): [String!]! {
+  text.splitMatches(`\s+`).filter { word => word != "" }
+}
+
+# A text without the whitespace at its end.
+let devTrimEnd(text: String!): String! {
+  text.replaceMatches(`\s+$`, "")
+}
+
+# A text as a message shows it: in quotes, with its backslashes, quotes, line
+# ends and tabs escaped.
+let devQuoted(text: String!): String! {
+  let escaped = text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+  "\"" + escaped.replace("\r", "\\r").replace("\t", "\\t") + "\""
+}
+
+# A list of texts as a message shows it.
+let devQuotedList(items: [String!]!): String! {
+  "[" + items.map { item => devQuoted(item) }.join(", ") + "]"
+}
+
+# Byte-order sort, by insertion: the lists here are short.
+let devSorted(items: [String!]!): [String!]! {
+  let none: [String!]! = []
+  items.reduce(none) { sorted, item =>
+    sorted.filter { other => other <= item } + [item] + sorted.filter { other => other > item }
+  }
+}

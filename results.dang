@@ -1,0 +1,35 @@
+# How a package's check reads its share of a shared step's result.
+#
+# A lane whose packages share one Cargo command (clippy, the test build) runs
+# that command once over the selected packages and writes one file per
+# package. Each package's check then reads its own file. Every check of the
+# workspace builds the same step from the same inputs, so the engine runs it
+# once, and the checks differ only in the file they read.
+
+# The result of a shared step.
+type RustLaneResults {
+  # The lane, for messages: "clippy" or "test".
+  let lane: String!
+
+  # The packages the step covered, in key order: RustPackages.selected.
+  let covered: [RustMember!]!
+
+  # One file per covered package, named by the package's position in covered:
+  # "0", "1", ... A package that passed has an empty file. One that failed
+  # has what to tell the user: the diagnostics or the failed tests.
+  let results: Directory!
+
+  # Fails when the step found a problem in the package at a path. Numbered
+  # files avoid any limit or clash that package paths have as file names.
+  let assertPassed(path: String!): Void {
+    if (covered.any { member => member.path == path } == false) {
+      raise "rust: package " + path + " is outside the " + lane + " selection"
+    }
+    let position = covered.filter { member => member.path < path }.length
+    let failure = results.file(`${position}`).contents
+    if (failure != "") {
+      raise "rust: " + lane + " failed in " + path + ":\n" + failure
+    }
+    null
+  }
+}

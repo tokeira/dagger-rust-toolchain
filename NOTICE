@@ -1,0 +1,10 @@
+Rust toolchain module for Dagger
+Copyright 2026 Ian Wilkinson
+
+Parts of this module are adapted from dagger.io/go
+(https://github.com/dagger/go), Copyright 2022 Dagger, Inc., licensed under
+the Apache License, Version 2.0, and have been changed for Cargo workspaces.
+Each file that holds such a part says which parts it adapts: support.dang,
+discovery.dang, rust.dang, packages.dang and compile.dang.
+
+This module is not affiliated with Dagger, Inc.

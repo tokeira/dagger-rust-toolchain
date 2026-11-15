@@ -1,0 +1,16 @@
+# This manifest is written the way the dependency layer's recipe writes one:
+# every target named, and the version the recipe gives every member. Cargo
+# then takes this package and the recipe's stub of it for the same thing.
+
+[package]
+name = "build-stale"
+edition = "2021"
+version = "0.0.1"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+name = "build_stale"
+edition = "2021"
+required-features = []
+crate-type = ["lib"]

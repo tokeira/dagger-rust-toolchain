@@ -1,0 +1,118 @@
+# The content-keyed layers: steps whose inputs are all content, so that any
+# engine cache can serve them. None mounts a cache volume.
+#
+#   toolchain  the image, then rustup's install of the workspace's toolchain
+#              and of the components a lane asks for. Keyed on the image,
+#              systemPackages, the toolchain files and settings, and the
+#              component list. Source edits never touch it.
+#   fetch      `cargo fetch` over the workspace's recipe, with no registry
+#              volume, so the downloaded crates are part of the result. Keyed
+#              on the toolchain layer and on what the recipe says: the
+#              manifests without the members' versions, Cargo.lock, the Cargo
+#              configuration and the set of target paths. Every lane that
+#              needs crates takes them from this one layer.
+
+# The module's pinned image, by the digest of its multi-platform index: the
+# default of the image setting, and where the module builds its own helper.
+let rustPinnedImage: String! = "rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea"
+
+# The files rustup reads to choose a toolchain.
+let rustToolchainPatterns: [String!]! = ["rust-toolchain", "rust-toolchain.toml"]
+
+# The image, or the base that replaces it, as given.
+let rustImage(tool: Rust!): Container! {
+  if (tool.base == null) { container.from(tool.image) } else { tool.base!.withoutEntrypoint }
+}
+
+# The image with systemPackages installed: where every layer starts.
+let rustBase(tool: Rust!): Container! {
+  if (tool.systemPackages.length == 0) {
+    rustImage(tool)
+  } else {
+    rustImage(tool)
+      .withExec(["apt-get", "update", "-qq"])
+      .withExec(["apt-get", "install", "-y", "--no-install-recommends"] + tool.systemPackages)
+  }
+}
+
+# Cargo's home in the image, which holds the registry and git caches.
+let rustCargoHome(tool: Rust!): String! {
+  rustImage(tool).envVariable("CARGO_HOME") ?? "/usr/local/cargo"
+}
+
+# Paths of the toolchain files that apply to a workspace root: its own, and
+# those of the directories above it, where rustup looks next.
+let rustToolchainPaths(root: String!): [String!]! {
+  let empty: [String!]! = []
+  rustLineage(root).reduce(empty) { files, dir =>
+    files + rustToolchainPatterns.map { name => rustPathIn(dir, name) }
+  }
+}
+
+# The toolchain layer for a workspace root. `toolchain` names a toolchain to
+# install and select instead of the one the toolchain files name; without
+# either, the image's own toolchain is used.
+#
+# The toolchain files stay in the layer, at their paths under the mount path,
+# so rustup selects the same toolchain in the workspace root whether or not a
+# later step mounts the source there.
+let rustToolchainLayer(
+  tool: Rust!,
+  mountPath: String!,
+  root: String!,
+  files: Directory!,
+  toolchain: String,
+  components: [String!]!,
+): Container! {
+  let installed = if (toolchain != null) {
+    # RUSTUP_TOOLCHAIN outranks every toolchain file, here and in every later
+    # step that starts from this layer.
+    rustBase(tool)
+      .withWorkdir(rustPathIn(mountPath, root))
+      .withEnvVariable("RUSTUP_TOOLCHAIN", toolchain ?? "")
+      .withExec(["rustup", "toolchain", "install", toolchain ?? "", "--profile", "minimal", "--no-self-update"])
+  } else if (files.glob("**/rust-toolchain*").length > 0) {
+    # rustup installs the toolchain the files name, with the components,
+    # targets and profile they ask for.
+    rustBase(tool)
+      .withDirectory(mountPath, files)
+      .withWorkdir(rustPathIn(mountPath, root))
+      .withExec(["rustup", "toolchain", "install", "--no-self-update"])
+  } else {
+    rustBase(tool).withWorkdir(rustPathIn(mountPath, root))
+  }
+  let targeted = if (tool.target == null) { installed } else {
+    installed.withExec(["rustup", "target", "add", tool.target ?? ""])
+  }
+  if (components.length == 0) { targeted } else {
+    targeted.withExec(["rustup", "component", "add"] + components)
+  }
+}
+
+# The fetch layer: the toolchain layer with the workspace's crates downloaded
+# into Cargo's home. The recipe stays mounted, so with locked off the
+# Cargo.lock that Cargo resolved is at the workspace root there.
+let rustFetchLayer(
+  tool: Rust!,
+  toolchain: Container!,
+  mountPath: String!,
+  recipe: Directory!,
+): Container! {
+  let home = rustCargoHome(tool)
+  let none: [String!]! = []
+  toolchain
+    .withDirectory(home + "/registry", directory)
+    .withDirectory(home + "/git", directory)
+    .withMountedDirectory(mountPath, recipe)
+    .withExec(["cargo", "fetch"] + (if (tool.locked) { ["--locked"] } else { none }))
+}
+
+# A container with the crates of a fetch layer in Cargo's home, and Cargo
+# kept off the network: how a lane gives its own toolchain layer the crates.
+let rustWithCrates(tool: Rust!, ctr: Container!, fetched: Container!): Container! {
+  let home = rustCargoHome(tool)
+  ctr
+    .withMountedDirectory(home + "/registry", fetched.directory(home + "/registry"))
+    .withMountedDirectory(home + "/git", fetched.directory(home + "/git"))
+    .withEnvVariable("CARGO_NET_OFFLINE", "true")
+}

@@ -1,0 +1,10 @@
+[package]
+name = "deny-flagged"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+# Unmaintained, by RUSTSEC-2020-0095: what cargo-deny must find in the advisory database.
+difference = "=2.0.0"
