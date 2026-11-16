@@ -580,7 +580,8 @@ on any engine that has run them. The run sees:
 - the workspace's `.config/nextest.toml`, and the files of `includeExtraFiles`.
 
 A test that reads a file of another package finds it only if `includeExtraFiles` names
-it.
+it. That holds for a member below the package's own directory too: a pattern such as
+`["libgit2-sys/**"]` puts that member's files in the run, in place of the empty ones.
 
 rustdoc compiles doctests when they run, against the libraries in the test build's
 target directory. They therefore run in one step for all the selected packages, which
@@ -673,7 +674,7 @@ assertion that does not hold.
 | `nested-workspaces` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. |
 | `lint-lanes` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes. |
 | `build-lanes` | The recipe, the check flavour of the dependency layer, the check, clippy and doc lanes, and the settings `checkAllFeatures`, `checkNoDefaultFeatures`, `buildJobs` and `cargoEnvironment`. |
-| `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. |
+| `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. That `includeExtraFiles` gives a package's run a file of a member below it. |
 | `cache-volumes` | The compile lanes' volumes, and the helper that runs a lane's step. |
 | `whole-workspace` | The `wholeWorkspace` setting: the check names, the tests over the whole repository, and the one clippy check and fmt generator. |
 | `shared-layers` | That the seven lanes of a workspace share one recipe and one fetch. |

@@ -835,7 +835,9 @@ binaries whether Cargo found them in a warm volume or compiled them in a new one
 - At `mountPath`: the skeleton, and over it the package's own directory without the
   directories of members below it, the workspace's `.config/nextest.toml`, and the files
   of `includeExtraFiles`. Other packages' source files are empty there. A test that reads
-  a file of another package finds it only if `includeExtraFiles` names it. It is the
+  a file of another package finds it only if `includeExtraFiles` names it. `rustTestView`
+  adds the setting's files after the package's own, so that they reach a member below
+  the package's directory, which the package's own files leave out. It is the
   skeleton and not the recipe because this is what a test reads when it runs: the
   skeleton has every manifest as the repository has it, and the recipe masks the
   members' versions.
@@ -1037,7 +1039,7 @@ assertion that does not hold.
 | `nested-workspaces` | `devCoreNested`, in `core.dang` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. | `nested` |
 | `lint-lanes` | `devLint`, in `lanes-lint.dang` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes: what each of the two cargo-deny checks rejects, and that a moved advisory database runs `advisories` again and leaves `deny` cached. | `single`, and those whose names start `lint-` |
 | `build-lanes` | `devBuild`, in `lanes-build.dang` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. The settings `checkAllFeatures` and `checkNoDefaultFeatures`, and what the check lane runs with both off. `buildJobs` and `cargoEnvironment`, in the dependency layer and in the three lanes. | `members`, `single`, `pair`, `nested`, and those whose names start `build-` |
-| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. | `single`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
+| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. That a test which reads a file of a member below its package fails by default, and passes when `includeExtraFiles` names the file. | `single`, `members`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
 | `cache-volumes` | `devCache`, in `lanes-cache.dang` | The helper's own tests, and the compile lanes' volumes: their names, what a lane compiles over empty volumes, after a one-file edit and after a change to the dependency layer, that a deleted file is gone, and that verdicts over warm volumes and over empty ones agree. | `test-suite`, `pair`, `build-lints`, `build-stale` |
 | `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; the one clippy check and the one fmt generator. | `test-whole`, `build-lints`, `lint-fmt` |
 | `shared-layers` | `devCoreShared`, in `core.dang` | That the seven lanes of a workspace share one recipe and one fetch. | `lint-deny` |

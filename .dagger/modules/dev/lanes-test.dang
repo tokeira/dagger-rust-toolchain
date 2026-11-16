@@ -75,10 +75,11 @@ let devTest(run: DevRun!): [String!]! {
   let single = devTestSingle(run)
   let alone = devTestAlone(run)
   let stubs = devTestStubs(run)
+  let below = devTestBelow(run)
   let jobs = devTestJobs(run)
   let environment = devTestEnvironment(run)
   let suite = devTestOverSuite(run)
-  runner + single + alone + stubs + jobs + environment + suite
+  runner + single + alone + stubs + below + jobs + environment + suite
 }
 
 # The runner's pins. A run of the lane fetches the archive of the engine's
@@ -219,6 +220,39 @@ let devTestStubs(run: DevRun!): [String!]! {
         + "without the test harness, and for one that depends by path on a package outside its "
         + "root: the dependency layer's test flavour builds over each stub of the recipe, and "
         + "tolerates no failure",
+    ),
+  ]
+}
+
+# A test that reads a file of a member below its own package: the run has the
+# file only when includeExtraFiles names it.
+let devTestBelow(run: DevRun!): [String!]! {
+  let test = "#[test]\nfn reads_a_file_of_the_member_below() {\n    "
+    + "assert_eq!(std::fs::read_to_string(\"derive/notes.txt\").unwrap(), \"kept\");\n}\n"
+  let workspace = devConsumer(run, "members", "")
+    .withNewFile("/members/crates/core/derive/notes.txt", "kept")
+    .withNewFile("/members/crates/core/tests/below.rs", test)
+  let core = ["check", "--check=test", "--rust-package=crates/core"]
+  let check = "the tests of crates/core, one of which reads a file of crates/core/derive"
+  let output = devFailing(workspace, run, core)
+  devSays(check, output, "rust: test failed in crates/core:")
+  devSays(check, output, "reads_a_file_of_the_member_below")
+  devStdout(
+    devConfigured(
+      workspace,
+      run,
+      "members",
+      "includeExtraFiles = [\"crates/core/derive/notes.txt\"]\n",
+    ),
+    run,
+    core,
+  )
+  [
+    devHeld(
+      "members: a test of crates/core that reads a file of crates/core/derive, a member "
+        + "below it, fails by default, since the run has that member's manifest and target "
+        + "paths alone; under includeExtraFiles = [\"crates/core/derive/notes.txt\"] the run "
+        + "has the file, and the test passes",
     ),
   ]
 }

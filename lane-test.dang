@@ -196,7 +196,8 @@ let rustTestNextestFiles(outputs: Directory!, directory: String!): [String!]! {
 # skeleton, so that Cargo and nextest can load the workspace, and over it
 # the package's own files, the workspace's nextest configuration, and the
 # includeExtraFiles setting's. Another member's directory below the package's
-# is that member's, not the package's.
+# is that member's, not the package's: the run has it only where the setting
+# names its files, which then take the place of the skeleton's.
 #
 # It is the skeleton and not the recipe, because this is what a test reads
 # when it runs, not what Cargo compiles: the skeleton has every manifest as
@@ -207,15 +208,22 @@ let rustTestView(package: RustPackage!, selection: RustPackages!): Directory! {
     .members
     .filter { member => member.path != package.path and rustUnder(member.path, package.path) }
     .map { member => member.path }
-  workspace.skeletonOf(package.inputs).withDirectory(
+  let own = workspace.skeletonOf(package.inputs).withDirectory(
     "/",
     package.inputs.source.filter(
       include: rustScoped(package.path, ["**"])
-        + [rustPathIn(workspace.path, ".config/nextest.toml")]
-        + workspace.tool.includeExtraFiles,
+        + [rustPathIn(workspace.path, ".config/nextest.toml")],
       exclude: nested,
     ),
   )
+  # The setting's files are added apart, so that leaving the members below
+  # the package out of its own files does not leave them out of these.
+  if (workspace.tool.includeExtraFiles.length == 0) { own } else {
+    own.withDirectory(
+      "/",
+      package.inputs.source.filter(include: workspace.tool.includeExtraFiles),
+    )
+  }
 }
 
 # The files of the build's kept files that a run needs, as a directory of
