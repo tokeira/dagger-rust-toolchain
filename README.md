@@ -18,16 +18,15 @@ cache volumes, so that after an edit Cargo compiles only what the edit reaches.
 
 ## Install
 
-In the `dagger.toml` of a repository that holds Cargo workspaces:
+In the `dagger.toml` of a repository that holds Rust code:
 
 ```toml
 [modules.rust]
 source = "github.com/tokeira/dagger-rust-toolchain@v0.2.0"
-
-[modules.rust.settings]
-fmtToolchain = "nightly-2026-06-16"
-includeExtraFiles = ["proto/**"]
 ```
+
+Start with no settings. [First run](#first-run) says what the module then finds, and
+which settings a repository may come to need.
 
 The module needs Dagger `v1.0.0-beta.27` or later:
 [Supported engines](#supported-engines) has the policy.
@@ -36,7 +35,7 @@ The module needs Dagger `v1.0.0-beta.27` or later:
 $ dagger check -l --all --rust                       # each check, for each workspace and package
 $ dagger check --rust                                # every check
 $ dagger check --rust --check=clippy                 # clippy, every package
-$ dagger check --rust-package=crates/tokeira-types   # every check of one package
+$ dagger check --rust-package=crates/core            # every check of one package
 $ dagger generate --rust                             # rustfmt, every package
 $ dagger call rust workspace --path . fetched        # a layer, to inspect it
 ```
@@ -49,14 +48,48 @@ The first `dagger check --rust` builds each workspace's [layers](#layers): it in
 the toolchain, downloads the crates and compiles the dependencies. Later runs reuse them,
 and compile only what changed since.
 
+### What the module finds
+
+- **A package at the repository root** is checked, with or without a `[workspace]` table
+  and a `Cargo.lock`. So is every workspace that declares itself with a `[workspace]`
+  table or a committed `Cargo.lock`. [Workspaces and packages](#workspaces-and-packages)
+  has the rule. A repository in which the rule finds nothing fails, and says so.
+- **Names.** `dagger check -l --all --rust` lists each check for each workspace and
+  package. A package is named by its directory, not by its crate: the one at the root is
+  `.`. The format check is listed as `stale`.
+- **`Cargo.lock`.** Where a workspace has one, Cargo runs with `--locked`, and a lockfile
+  that is out of date fails. Where it has none, or `.gitignore` ignores it, Cargo
+  resolves the dependencies when the fetch layer is built, and every lane builds with
+  that resolution. [`locked`](#settings) has the setting.
+- **Submodules** are read as the checkout has them. Initialise them first.
+- **`dagger.lock`.** Dagger keeps it beside `dagger.toml`, and pins there the lookups a
+  run resolved, such as the commit that the module's tag names. Commit it:
+  [Dagger's reference](https://docs.dagger.io/reference/config-files/dagger-toml#daggerlock)
+  says how a run uses it.
+
+### What a run did
+
+A check that passes prints nothing of what it ran. A check that fails prints the
+command that failed and the end of its output.
+
+- `dagger --progress=plain -vvv check --rust` lists each container command of the run,
+  with `DONE` when it ran and `CACHED` when the engine had it.
+- `dagger call rust workspace --path . compiled --lane clippy file --path
+  /var/cache/rust/report contents` prints what a compile lane's step did: the command, the
+  files it wrote to its mirror, and the packages Cargo compiled.
+  [Cache volumes](#cache-volumes) has an example.
+
 ### The settings most repositories change
 
 | Setting | When to change it |
 | --- | --- |
-| [`clippyArgs`](#clippy) | clippy denies warnings by default. Set `clippyArgs = []` to allow them. |
+| [`clippyArgs`](#clippy) | clippy denies warnings by default, and with them a lint name that the toolchain's clippy does not know. Set `clippyArgs = []` to allow them. |
 | [`checkNoDefaultFeatures`](#check) | It is on by default, so `check` builds the workspace under `--no-default-features`. Turn it off where the workspace does not build without its default features. |
 | [`checkAllFeatures`](#check) | It is off by default: `--all-features` often fails in a library, where two features exclude each other or one needs a system library. Turn it on where every feature builds together, with [`systemPackages`](#settings) for what the features need. |
-| [`wholeWorkspace`](#one-item-for-the-workspace) | Turn it on to have one clippy check and one test check for each workspace, so that the check names stay the same as crates come and go. |
+| [`wholeWorkspace`](#one-item-for-the-workspace) | Turn it on to have one clippy check and one test check for each workspace, so that the check names stay the same as crates come and go. Turn it on too where a test reads the repository around its package, or builds a project that depends on the workspace, as a trybuild test does: [Whole-workspace tests](#whole-workspace-tests). |
+| [`testRunner`](#tests) | Set it to `"cargo"` where a test target has `harness = false`. cargo-nextest lists a binary's tests before it runs them, and such a binary runs in place of listing. |
+| [`target`](#settings) | It applies to every lane, the tests and their dev-dependencies included, so a target without `std` fails the test lane. |
+| [`check.skip`](#doc) | It is Dagger's own setting, beside `source`, and takes a check off the list. The doc lane denies rustdoc's warnings and has no setting to allow them, so `check.skip = ["workspaces/doc"]` is the way to leave it out. |
 | [`workspaceRoots`](#workspaces-and-packages) | Leave out fixtures and vendored workspaces, as `["**", "!fixtures"]` does. |
 | [`includeExtraFiles`](#settings) | The build reads files outside the workspace. |
 | [`systemPackages`](#settings) | The build needs Debian packages. |
@@ -109,9 +142,9 @@ its own workspace's root, so a member that keeps a stray `Cargo.lock` is not one
 member packages come from `cargo metadata --no-deps` too, so Cargo's rules for member
 globs, `exclude` and nested packages apply.
 
-A repository that has Cargo manifests and no workspace fails every command, with the rule
-above or with the `workspaceRoots` setting that left the roots out. No check passes for
-having had nothing to check.
+A repository that has Cargo manifests and no workspace fails `dagger check` and its
+listing, with the rule above or with the `workspaceRoots` setting that left the roots out.
+No check passes for having had nothing to check.
 
 Both are collections, keyed by directory relative to the repository root. `"."` is the
 repository root.
@@ -201,6 +234,12 @@ compiled only because a named package needs it is not linted.
 Each package's tests run in a step of their own, under cargo-nextest, and then its
 doctests. [Tests](#tests) has the steps.
 
+- A test target with `harness = false` needs `testRunner = "cargo"`. cargo-nextest lists
+  a binary's tests by running it with `--list`, and such a binary runs its tests instead.
+- A test that reads a file outside its package, or builds a project that depends on the
+  workspace, as a trybuild test does, needs `wholeWorkspace = true`:
+  [Whole-workspace tests](#whole-workspace-tests).
+
 ### check
 
 clippy compiles every target under the settings' features and reports what `cargo check`
@@ -245,9 +284,9 @@ has a `deny.toml`, and passes without running anything when it has none. It fail
   `Cargo.lock` or another file that is not Rust source changes. An edit to a Rust file
   leaves it cached, and so does anything that RustSec publishes: only a change to the
   repository changes its verdict.
-- `locked` passes `--locked` where the workspace has a `Cargo.lock`, and `target`, `features`, `allFeatures` and
-  `noDefaultFeatures` pass cargo-deny's flags of the same names, which choose the
-  dependency graph it checks over what `deny.toml` says.
+- `locked` passes `--locked` where the workspace has a `Cargo.lock`, and `target`,
+  `features`, `allFeatures` and `noDefaultFeatures` pass cargo-deny's flags of the same
+  names, which choose the dependency graph it checks over what `deny.toml` says.
 
 ### advisories
 
@@ -272,7 +311,14 @@ applies and with the same flags. It fails with
 $ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps <settings' flags>
 ```
 
-A warning fails the check, with rustdoc's message.
+A warning fails the check, with rustdoc's message: a broken intra-doc link, for example.
+No setting allows warnings. To leave the check out, skip it with Dagger's own setting,
+beside the module's `source`:
+
+```toml
+[modules.rust]
+check.skip = ["workspaces/doc"]
+```
 
 ## Settings
 
@@ -291,7 +337,7 @@ Settings are the constructor's arguments, set under `[modules.rust.settings]`.
 | `checkAllFeatures` | bool | `false` | Build the workspace under `--all-features` in the [check lane](#check). |
 | `checkNoDefaultFeatures` | bool | `true` | Build the workspace under `--no-default-features` in the check lane. |
 | `buildProfile` | string | Cargo's default | Passed as `--profile`. |
-| `target` | string | Cargo's default | One target triple, passed as `--target`. The toolchain layer adds its standard library. |
+| `target` | string | Cargo's default | One target triple, passed as `--target` in every lane, the tests included. The toolchain layer adds its standard library. |
 | `locked` | bool | `true` | Pass `--locked` in a workspace that has a `Cargo.lock`, so that an out-of-date lockfile fails. A workspace with no `Cargo.lock`, or one that `.gitignore` ignores, runs without `--locked`, and Cargo resolves its dependencies in the fetch layer. |
 | `buildJobs` | integer | Cargo's choice, one job for each processor | Cargo's job count, as `CARGO_BUILD_JOBS`, in every step that compiles. `0` is refused. |
 | `cargoEnvironment` | list | `[]` | Environment variables, each as `NAME=value`, for the steps that compile the workspace or run its tests, such as `["CI=1"]`. Never a secret: see [Large workspaces](#large-workspaces). |
