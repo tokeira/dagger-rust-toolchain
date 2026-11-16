@@ -29,7 +29,8 @@ fmtToolchain = "nightly-2026-06-16"
 includeExtraFiles = ["proto/**"]
 ```
 
-The module needs Dagger `v1.0.0-beta.27` or later.
+The module needs Dagger `v1.0.0-beta.27` or later:
+[Supported engines](#supported-engines) has the policy.
 
 ```console
 $ dagger check -l --all --rust                       # each check, for each workspace and package
@@ -72,6 +73,23 @@ With [Cloud Checks](#on-ci) on, each check has a commit status of its own.
 - Copy the exact names from a commit's statuses, because a name can carry its trigger: a
   push to a branch posts `rust/workspaces/check (push)`, where a push to main posts
   `rust/workspaces/check`.
+
+## Supported engines
+
+The module declares `engineVersion = "v1.0.0-beta.27"`, and needs Dagger `v1.0.0-beta.27`
+or later. Dagger's stable line, v0.21.x, cannot run it: an engine refuses a module that
+declares a later release than its own.
+
+- **Supported** means that the module's own checks passed on that engine. Today that is
+  `v1.0.0-beta.27` alone.
+- **A new beta.** When Dagger releases one, the module's checks run on it before this
+  section lists it as supported. A beta that breaks the module gets a fix in a new
+  release of the module.
+- **`engineVersion`** is raised only in a minor release, and that release's notes say so.
+- **Release notes.** Each release's notes name the betas it was tested on.
+
+[CONTRIBUTING.md](CONTRIBUTING.md#testing-a-new-dagger-beta) says how to run the checks
+on a new beta.
 
 ## Workspaces and packages
 
