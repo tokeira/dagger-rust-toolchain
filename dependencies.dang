@@ -165,6 +165,23 @@ let rustDependenciesFeatures(tool: Rust!): [String!]! {
     + (if (tool.noDefaultFeatures) { ["--no-default-features"] } else { none })
 }
 
+# What the engine says of a step that failed: its command, its exit code,
+# and the end of what it wrote to stderr, which the error carries from the
+# end, up to 100 KiB. The command names the build, with its feature flags.
+# Any other failure is reported as the engine words it.
+let rustDependenciesStep(failed: GraphQLError!): {{cmd: [String!], exitCode: Int, stderr: String}}! {
+  JSON.decode(failed.extensions)
+}
+
+let rustDependenciesFailure(failed: GraphQLError!): String! {
+  let step = rustDependenciesStep(failed)
+  let code = step.exitCode
+  if (step.cmd == null or code == null) { failed.message } else {
+    "`" + (step.cmd ?? []).join(" ") + "`" + ` failed with exit code ${code}` + ":\n"
+      + rustTestTail(step.stderr ?? "")
+  }
+}
+
 # The dependency layer, check flavour: the fetch layer, which has the recipe
 # mounted, with the workspace's dependencies compiled by `cargo check` into
 # the target directory.
@@ -187,7 +204,9 @@ let rustDependenciesFeatures(tool: Rust!): [String!]! {
 # the lockfile the shapes compiled with takes from a path.
 #
 # A failed step is not kept, so a build that was killed runs again next
-# time. Cargo's output is in the step's own log.
+# time. The layer raises with the command that failed and the end of what
+# Cargo wrote: rustDependenciesFailure. The command may be the fetch layer's
+# `cargo fetch`, which runs when this layer is evaluated.
 let rustDependenciesLayer(
   workspace: RustWorkspace!,
   inputs: RustInputs!,
@@ -205,8 +224,8 @@ let rustDependenciesLayer(
       .withEnvVariable("CARGO_TARGET_DIR", rustDependenciesTarget),
   ) { ctr, shape => ctr.withExec(shape) }
   let compiled = shaped.sync rescue {
-    err: Error => raise "rust: the dependencies of the workspace " + workspace.path
-      + " did not compile (" + err.message + "); the failed step's log has Cargo's output"
+    failed: GraphQLError => raise "rust: the dependency layer of the workspace " + workspace.path
+      + " was not built: " + rustDependenciesFailure(failed)
   }
   let local = rustDependenciesLocal(compiled.file(rustDependenciesLock(workspace)).contents)
   # cargo clean removes a package's artifacts for one profile and one
@@ -217,9 +236,8 @@ let rustDependenciesLayer(
       + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
       + local.reduce(none) { flags, package => flags + ["-p", package] },
   ).sync rescue {
-    err: Error => raise "rust: the dependencies of the workspace " + workspace.path
-      + " could not be cleaned of its own packages (" + err.message
-      + "); the failed step's log has Cargo's output"
+    failed: GraphQLError => raise "rust: the dependency layer of the workspace " + workspace.path
+      + " could not be cleaned of its own packages: " + rustDependenciesFailure(failed)
   }
 }
 

@@ -243,14 +243,21 @@ let devBuildDependencies(run: DevRun!): [String!]! {
   let unknown = devConfigured(workspace, run, "members", "features = [\"absent\"]\n")
   let output = devFailing(unknown, run, ["check", "--check=doc"])
   let absent = "dagger check --check=doc under a feature no package has"
-  devSays(absent, output, "cargo check --workspace --all-targets --locked --features absent")
+  devSays(
+    absent,
+    output,
+    "rust: the dependency layer of the workspace . was not built: `cargo check --workspace "
+      + "--all-targets --locked --features absent` failed with exit code 101:",
+  )
   devSays(absent, output, "none of the selected packages contains this feature: absent")
+  devSilent(absent, output, "the failed step's log")
   devSilent(absent, output, "cargo doc")
   passed += [
     devHeld(
       "members: when cargo check fails over the recipe, here for a feature no package has, "
-        + "a lane fails at that step of the dependency layer, with Cargo's message, and does "
-        + "not run its own command",
+        + "a lane fails at that step of the dependency layer and does not run its own "
+        + "command; its message names the command that failed, with its flags and exit code, "
+        + "and carries Cargo's error",
     ),
   ]
   passed

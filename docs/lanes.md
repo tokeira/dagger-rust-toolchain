@@ -327,10 +327,11 @@ or a download that failed.
   again. `rustCompileCargo` runs a compile lane's command through it, under the helper,
   and `rustDependenciesCargo(lane, command, output)` the command of the dependency
   layer's test flavour, which mounts no volume.
-- A step whose failure may not be the source's runs without `expect`, and its error
-  is only `exit code: N`. The fetch layer does, because it reaches the network, and so
-  do the check flavour's `cargo check` steps, whose error names the workspace and points
-  to the failed step's log.
+- A step whose failure may not be the source's runs without `expect`. Its error's
+  message is only `exit code: N`, and its `extensions` carry the step's command, its
+  exit code and the end of each output. The fetch layer runs so, because it reaches the
+  network, and so do the check flavour's `cargo check` steps, whose `rescue` reads the
+  extensions and raises with the command and the end of Cargo's stderr.
 
 ### Keep to the module's conventions
 
@@ -484,7 +485,12 @@ Both flavours:
 - **Tolerate no failure.** cargo-chef's stubs compile, so a build that fails over the
   recipe is the dependencies' failure or the settings': a dependency that does not build,
   a feature no package has, a `Cargo.lock` that `--locked` refuses. The layer raises, and
-  the lane does not run its own command. The acceptance runs both flavours over a stub of
+  the lane does not run its own command. The check flavour's message is `rust: the
+  dependency layer of the workspace <root> was not built:`, then the command that failed
+  with its flags and exit code, and the end of Cargo's stderr. `rustDependenciesFailure`
+  reads them from the error of the failed step, which carries the step's command, exit
+  code and the end of each output. The test flavour runs its build with `expect: ANY`,
+  and raises with the end of Cargo's output. The acceptance runs both flavours over a stub of
   every kind of target (`build-kinds`) and over a package outside the workspace root
   (`build-outside`).
 - **Keep nothing of the stubs.** Cargo decides by modification time whether a package it
@@ -958,11 +964,12 @@ repository around it in either case. `git` the program is in the image.
   reads those messages to tell whether a member's library was compiled, and the host
   artifact can hide a target library that failed. A package that needs that library is
   then not "blocked", and can pass although clippy never checked it.
-- **The fetch layer says little when it fails.** With `locked` on and no `Cargo.lock`,
-  `cargo fetch --locked` fails and the check's error is a bare `exit code: 101`: Cargo's
-  message is only in the failed step's log. The step is not run with `expect: ANY`, which
-  would let a lane report the message, because the engine keeps the result of such a
-  step, and would then keep a failure that the network caused.
+- **A failed fetch is never kept.** With a `Cargo.lock` that is out of date, `cargo fetch
+  --locked` fails. The step is not run with `expect: ANY`, because the engine keeps the
+  result of such a step, and would then keep a failure that the network caused. So the
+  fetch runs again in every lane that needs it, each time the check runs. The check,
+  clippy and doc lanes report it as the dependency layer does, with the command and the
+  end of Cargo's output. The other lanes report it as the engine words a failed step.
 - **The shared doctest step runs again after every source edit.** rustdoc compiles
   doctests when they run, against the libraries in the test lane's target volume, so
   the step is keyed on the test build and not on any package's files. After an edit to
