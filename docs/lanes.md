@@ -725,7 +725,8 @@ and its text. Its verdict is the packages' verdicts taken together.
 `rustCheckLane` runs `cargo check --quiet --workspace` under `--no-default-features` and
 under `--all-features`, the two ends of the feature space that clippy does not reach.
 `rustCheckEnds` leaves an end out when the settings already put clippy there, and when
-its own setting is off: `checkNoDefaultFeatures` or `checkAllFeatures`. The lane passes
+its own setting is off: `checkNoDefaultFeatures`, on by default, or `checkAllFeatures`,
+off by default. So by default the lane runs `--no-default-features` alone. The lane passes
 the ends to the dependency layer as `sets`. Each set is a step of its own in the lane's
 volumes (`rustCheckRun`), and each syncs the mirror for itself. Cargo keeps what it
 compiled under one set apart from the other, so both stay warm in the one target volume.

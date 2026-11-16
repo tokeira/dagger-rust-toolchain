@@ -182,10 +182,11 @@ type Rust {
     """
     noDefaultFeatures: Boolean! = false,
     """
-    Build the workspace under --all-features in the check lane. Turn it off
-    for a workspace whose features do not all compile together.
+    Build the workspace under --all-features in the check lane. It is off by
+    default: a workspace's features often do not all compile together, or
+    one of them needs a system library.
     """
-    checkAllFeatures: Boolean! = true,
+    checkAllFeatures: Boolean! = false,
     """
     Build the workspace under --no-default-features in the check lane.
     """

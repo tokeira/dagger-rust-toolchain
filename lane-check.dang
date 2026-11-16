@@ -9,8 +9,9 @@
 #   --all-features          every feature at once
 #
 # each for the libraries and binaries of every member. An end is left out
-# when the settings already put clippy there, and when its setting,
-# checkNoDefaultFeatures or checkAllFeatures, turns it off.
+# when the settings already put clippy there, and when its setting is off:
+# checkNoDefaultFeatures, on by default, or checkAllFeatures, off by default.
+# So by default the lane runs --no-default-features alone.
 #
 # When no end is left, the lane checks the workspace once under the
 # settings' own features. A check that passed has then always compiled the

@@ -429,10 +429,7 @@ let devBuildCheck(run: DevRun!): [String!]! {
   devSays(check, output, "build-features needs its std feature")
   devSilent(check, output, "cargo check --all-features failed")
   let ran = devBuildRan(devBuildTracedAny(workspace, run, lane), "cargo check --quiet")
-  let expected = [
-    "cargo check --quiet --workspace --locked --no-default-features",
-    "cargo check --quiet --workspace --locked --all-features",
-  ]
+  let expected = ["cargo check --quiet --workspace --locked --no-default-features"]
   if (ran != expected) {
     raise devCheckFailed(
       check,
@@ -442,21 +439,26 @@ let devBuildCheck(run: DevRun!): [String!]! {
   devStdout(workspace, run, ["check", "--check=clippy", "--check=doc"])
   passed += [
     devHeld(
-      "build-features: the check lane runs cargo check --workspace under "
-        + "--no-default-features and under --all-features; the first fails with the package's "
-        + "compile error, the second passes, and clippy and doc, under the default features, pass",
+      "build-features: by default the check lane runs cargo check --workspace under "
+        + "--no-default-features alone, which fails with the package's compile error, and "
+        + "clippy and doc, under the default features, pass",
     ),
   ]
 
   # Under noDefaultFeatures clippy is at that end of the feature space, and
-  # finds the error. The check lane is left with --all-features, which
-  # compiles.
-  let bare = devConfigured(workspace, run, "build-features", "noDefaultFeatures = true\n")
+  # finds the error. With checkAllFeatures on, the check lane is left with
+  # --all-features, which compiles.
+  let bare = devConfigured(
+    workspace,
+    run,
+    "build-features",
+    "noDefaultFeatures = true\ncheckAllFeatures = true\n",
+  )
   let left = devBuildRan(devTraced(bare, run, lane), "cargo check --quiet")
   let remaining = ["cargo check --quiet --workspace --locked --all-features"]
   if (left != remaining) {
     raise devCheckFailed(
-      "dagger check --check=check under noDefaultFeatures",
+      "dagger check --check=check under noDefaultFeatures and checkAllFeatures",
       "ran " + devQuotedList(left) + ", not " + devQuotedList(remaining),
     )
   }
@@ -467,26 +469,32 @@ let devBuildCheck(run: DevRun!): [String!]! {
   passed += [
     devHeld(
       "build-features: under noDefaultFeatures = true clippy runs without the default "
-        + "feature and fails with the compile error, and the check lane runs --all-features "
-        + "alone and passes",
+        + "feature and fails with the compile error, and with checkAllFeatures = true the "
+        + "check lane runs --all-features alone and passes",
     ),
   ]
 
   # The end that fails, left out by its own setting. clippy stays under the
   # default features, and passes.
-  let spared = devConfigured(workspace, run, "build-features", "checkNoDefaultFeatures = false\n")
+  let spared = devConfigured(
+    workspace,
+    run,
+    "build-features",
+    "checkNoDefaultFeatures = false\ncheckAllFeatures = true\n",
+  )
   let kept = devBuildRan(devBuildTracedAny(spared, run, lane), "cargo check --quiet")
   if (kept != remaining) {
     raise devCheckFailed(
-      "dagger check --check=check under checkNoDefaultFeatures = false",
+      "dagger check --check=check under checkNoDefaultFeatures = false and checkAllFeatures",
       "ran " + devQuotedList(kept) + ", not " + devQuotedList(remaining),
     )
   }
   devStdout(spared, run, ["check", "--check=check", "--check=clippy"])
   passed += [
     devHeld(
-      "build-features: under checkNoDefaultFeatures = false the check lane runs "
-        + "--all-features alone and passes, and clippy, under the default features, passes",
+      "build-features: under checkNoDefaultFeatures = false and checkAllFeatures = true the "
+        + "check lane runs --all-features alone and passes, and clippy, under the default "
+        + "features, passes",
     ),
   ]
   passed
@@ -505,32 +513,11 @@ let devBuildEnds(run: DevRun!): [String!]! {
   let broken = "build-ends does not compile with its experimental feature"
 
   let check = "dagger check --check=check over build-ends"
-  let output = devFailing(workspace, run, lane)
-  devSays(check, output, "rust: cargo check --all-features failed in .:")
-  devSays(check, output, broken)
-  devSilent(check, output, "cargo check --no-default-features failed")
+  let spared = devBuildTracedAny(workspace, run, lane)
+  devBuildSame(check, devBuildRan(spared, "cargo check --quiet"), [bare])
+  devStdout(workspace, run, lane)
   devBuildSame(
-    check,
-    devBuildRan(devBuildTracedAny(workspace, run, lane), "cargo check --quiet"),
-    [
-      bare,
-      every,
-    ],
-  )
-  passed += [
-    devHeld(
-      "build-ends: by default the check lane runs both ends, and --all-features fails with "
-        + "the compile error of a package whose features do not compile together",
-    ),
-  ]
-
-  let without = devConfigured(workspace, run, "build-ends", "checkAllFeatures = false\n")
-  let withoutCheck = "dagger check --check=check under checkAllFeatures = false"
-  let spared = devBuildTracedAny(without, run, lane)
-  devBuildSame(withoutCheck, devBuildRan(spared, "cargo check --quiet"), [bare])
-  devStdout(without, run, lane)
-  devBuildSame(
-    "the dependency layer under checkAllFeatures = false",
+    "the dependency layer of build-ends",
     devBuildRan(spared, "cargo check --workspace"),
     [
       "cargo check --workspace --all-targets --locked",
@@ -540,13 +527,41 @@ let devBuildEnds(run: DevRun!): [String!]! {
   )
   passed += [
     devHeld(
-      "build-ends: under checkAllFeatures = false the check lane runs --no-default-features "
-        + "alone and passes, and the dependency layer compiles no --all-features shape",
+      "build-ends: by default the check lane runs --no-default-features alone and passes, "
+        + "and the dependency layer compiles no --all-features shape",
     ),
   ]
 
-  let alone = devConfigured(workspace, run, "build-ends", "checkNoDefaultFeatures = false\n")
-  let aloneCheck = "dagger check --check=check under checkNoDefaultFeatures = false"
+  let both = devConfigured(workspace, run, "build-ends", "checkAllFeatures = true\n")
+  let bothCheck = "dagger check --check=check under checkAllFeatures = true"
+  let output = devFailing(both, run, lane)
+  devSays(bothCheck, output, "rust: cargo check --all-features failed in .:")
+  devSays(bothCheck, output, broken)
+  devSilent(bothCheck, output, "cargo check --no-default-features failed")
+  devBuildSame(
+    bothCheck,
+    devBuildRan(devBuildTracedAny(both, run, lane), "cargo check --quiet"),
+    [
+      bare,
+      every,
+    ],
+  )
+  passed += [
+    devHeld(
+      "build-ends: under checkAllFeatures = true the check lane runs both ends, and "
+        + "--all-features fails with the compile error of a package whose features do not "
+        + "compile together",
+    ),
+  ]
+
+  let alone = devConfigured(
+    workspace,
+    run,
+    "build-ends",
+    "checkAllFeatures = true\ncheckNoDefaultFeatures = false\n",
+  )
+  let aloneCheck = "dagger check --check=check under checkAllFeatures = true and "
+    + "checkNoDefaultFeatures = false"
   let aloneOutput = devFailing(alone, run, lane)
   devSays(aloneCheck, aloneOutput, "rust: cargo check --all-features failed in .:")
   devBuildSame(
@@ -556,14 +571,14 @@ let devBuildEnds(run: DevRun!): [String!]! {
   )
   passed += [
     devHeld(
-      "build-ends: under checkNoDefaultFeatures = false the check lane runs --all-features "
-        + "alone, which fails",
+      "build-ends: under checkAllFeatures = true and checkNoDefaultFeatures = false the "
+        + "check lane runs --all-features alone, which fails",
     ),
   ]
 
   # No end is left: the lane checks the workspace under the settings' own
   # features, so that its verdict is still that of a build.
-  let off = "checkAllFeatures = false\ncheckNoDefaultFeatures = false\n"
+  let off = "checkNoDefaultFeatures = false\n"
   let neither = devConfigured(workspace, run, "build-ends", off)
   let neitherCheck = "dagger check --check=check with both ends off"
   let fallback = devTraced(neither, run, lane)
@@ -701,7 +716,6 @@ let devBuildJobs(run: DevRun!): [String!]! {
   let output = devFailing(two, run, devBuildChecks)
   devEach([
     "rust: cargo check --no-default-features failed in .:",
-    "cargo check --all-features failed in .:",
     "rust: clippy failed in .:",
     "rust: cargo doc failed in .:",
     devBuildJobsRefused("2"),

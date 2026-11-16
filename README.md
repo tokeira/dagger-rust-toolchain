@@ -54,7 +54,8 @@ and compile only what changed since.
 | Setting | When to change it |
 | --- | --- |
 | [`clippyArgs`](#clippy) | clippy denies warnings by default. Set `clippyArgs = []` to allow them. |
-| [`checkAllFeatures`, `checkNoDefaultFeatures`](#check) | Both are on by default, so `check` builds the workspace under `--all-features` and under `--no-default-features`. Turn one off where that build turns on a feature that cannot build in a plain container. tokeira/tokeira turns both off. |
+| [`checkNoDefaultFeatures`](#check) | It is on by default, so `check` builds the workspace under `--no-default-features`. Turn it off where the workspace does not build without its default features. |
+| [`checkAllFeatures`](#check) | It is off by default: `--all-features` often fails in a library, where two features exclude each other or one needs a system library. Turn it on where every feature builds together, with [`systemPackages`](#settings) for what the features need. |
 | [`wholeWorkspace`](#one-item-for-the-workspace) | Turn it on to have one clippy check and one test check for each workspace, so that the check names stay the same as crates come and go. |
 | [`workspaceRoots`](#workspaces-and-packages) | Leave out fixtures and vendored workspaces, as `["**", "!fixtures"]` does. |
 | [`includeExtraFiles`](#settings) | The build reads files outside the workspace. |
@@ -210,10 +211,15 @@ $ cargo check --workspace <--locked, --profile, --target> --no-default-features
 $ cargo check --workspace <--locked, --profile, --target> --all-features
 ```
 
-An end is left out when the settings already put clippy there: `--all-features` under
-`allFeatures`, and `--no-default-features` under `noDefaultFeatures` with no `features`.
-The settings `checkNoDefaultFeatures` and `checkAllFeatures`, both on by default, each
-turn one end off: for a workspace whose features were never all compiled together, say.
+Each end has a setting. `checkNoDefaultFeatures` is on by default. `checkAllFeatures` is
+off by default, so the lane runs the first command alone: every feature at once often
+fails in a library, where two features exclude each other or one needs a system library
+that the image lacks. Turn it on where the features build together, and name what they
+need in `systemPackages`.
+
+An end is also left out when the settings already put clippy there: `--all-features`
+under `allFeatures`, and `--no-default-features` under `noDefaultFeatures` with no
+`features`.
 
 When no end is left, the lane runs one command under the settings' own features:
 
@@ -282,7 +288,7 @@ Settings are the constructor's arguments, set under `[modules.rust.settings]`.
 | `features` | list | `[]` | Passed to every Cargo command as `--features`. |
 | `allFeatures` | bool | `false` | Pass `--all-features`. |
 | `noDefaultFeatures` | bool | `false` | Pass `--no-default-features`. |
-| `checkAllFeatures` | bool | `true` | Build the workspace under `--all-features` in the [check lane](#check). |
+| `checkAllFeatures` | bool | `false` | Build the workspace under `--all-features` in the [check lane](#check). |
 | `checkNoDefaultFeatures` | bool | `true` | Build the workspace under `--no-default-features` in the check lane. |
 | `buildProfile` | string | Cargo's default | Passed as `--profile`. |
 | `target` | string | Cargo's default | One target triple, passed as `--target`. The toolchain layer adds its standard library. |
@@ -309,14 +315,13 @@ without a leading `./`: such a pattern matches no directory.
 
 ## Large workspaces
 
-Five settings are for a workspace of many packages, or one whose tests do not stay in
+Four settings are for a workspace of many packages, or one whose tests do not stay in
 their own package:
 
 ```toml
 [modules.rust.settings]
 wholeWorkspace = true           # one fmt, one clippy and one test for the workspace
-checkAllFeatures = false        # no --all-features build in the check lane
-checkNoDefaultFeatures = false  # no --no-default-features build either
+checkNoDefaultFeatures = false  # no --no-default-features build in the check lane
 buildJobs = 1                   # CARGO_BUILD_JOBS, where memory is short
 cargoEnvironment = ["CI=1"]     # for build scripts and tests that read it
 ```
@@ -360,9 +365,9 @@ the list: it can only change what a collection holds. That is why the mode is on
 
 ### Fewer builds, fewer jobs
 
-- **`checkAllFeatures` and `checkNoDefaultFeatures`** each turn off one of the check
-  lane's two builds. With both off, the lane runs one `cargo check --workspace` under the
-  settings' features: [check](#check) has the reason.
+- **`checkNoDefaultFeatures`** turns off the check lane's `--no-default-features` build.
+  With `checkAllFeatures` off too, as it is by default, the lane runs one `cargo check
+  --workspace` under the settings' features: [check](#check) has the reason.
 - **To have no `check` at all**, or no other check, skip it with Dagger's own setting,
   beside the module's `source`. A check that is skipped is not listed and does not run:
 
