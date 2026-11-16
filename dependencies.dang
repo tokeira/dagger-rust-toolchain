@@ -136,7 +136,7 @@ let rustDependenciesLock(workspace: RustWorkspace!): String! {
 #
 # Both flavours of the dependency layer clean these packages, and each reads
 # the lockfile it compiled with: the recipe's, in which cargo-chef has masked
-# the members' versions, or with locked off the one the fetch resolved over
+# the members' versions, or without --locked the one the fetch resolved over
 # the recipe. The source's own lockfile names other versions.
 let rustDependenciesLocal(lock: String!): [String!]! {
   let none: [{{name: String!, version: String!, source: String}}!]! = []
@@ -149,9 +149,9 @@ let rustDependenciesLocal(lock: String!): [String!]! {
 
 # The flags of the settings that are not about features: --locked, --profile
 # and --target.
-let rustDependenciesFlags(tool: Rust!): [String!]! {
+let rustDependenciesFlags(tool: Rust!, inputs: RustInputs!): [String!]! {
   let none: [String!]! = []
-  (if (tool.locked) { ["--locked"] } else { none })
+  (if (inputs.locked) { ["--locked"] } else { none })
     + (if (tool.buildProfile == null) { none } else { ["--profile", tool.buildProfile ?? ""] })
     + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
 }
@@ -196,8 +196,9 @@ let rustDependenciesLayer(
   let tool = workspace.tool
   let none: [String!]! = []
   let check = ["cargo", "check", "--workspace"]
-  let shapes = [check + ["--all-targets"] + tool.cargoFlags, check + tool.cargoFlags]
-    + sets.map { set => check + rustDependenciesFlags(tool) + set }
+  let flags = rustCargoFlags(tool, inputs)
+  let shapes = [check + ["--all-targets"] + flags, check + flags]
+    + sets.map { set => check + rustDependenciesFlags(tool, inputs) + set }
   let shaped = shapes.reduce(
     rustWithJobs(tool, rustWithEnvironment(tool, workspace.fetchedOf(inputs)))
       .withEnvVariable("CARGO_NET_OFFLINE", "true")

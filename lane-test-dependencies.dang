@@ -40,7 +40,7 @@ let rustTestMounted(
   view: Directory!,
 ): Container! {
   let mounted = ctr.withMountedDirectory(workspace.mountPath, view)
-  if (workspace.tool.locked) { mounted } else {
+  if (inputs.locked) { mounted } else {
     let lock = workspace.workdir + "/Cargo.lock"
     mounted.withMountedFile(lock, workspace.fetchedOf(inputs).file(lock))
   }
@@ -74,7 +74,7 @@ let rustTestProfileFlags(tool: Rust!): [String!]! {
 let rustTestDependencies(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
   let tool = workspace.tool
   let none: [String!]! = []
-  let locked = if (tool.locked) { ["--locked"] } else { none }
+  let locked = if (inputs.locked) { ["--locked"] } else { none }
   let compiled = rustDependenciesCargo(
     rustTestMounted(
       workspace,

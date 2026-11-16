@@ -21,7 +21,10 @@ let rustDocRun(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
       "",
     )
       .withEnvVariable("RUSTDOCFLAGS", "-D warnings"),
-    ["cargo", "doc", "--quiet", "--workspace", "--no-deps"] + workspace.tool.cargoFlags,
+    ["cargo", "doc", "--quiet", "--workspace", "--no-deps"] + rustCargoFlags(
+      workspace.tool,
+      inputs,
+    ),
     "/tmp/rust-doc-output",
     ["--renew", "all"],
   )

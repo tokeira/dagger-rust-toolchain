@@ -38,13 +38,13 @@ let rustDenyBinary(platform: String!): File! {
 # the target files to exist and cargo-deny does not read them, so an edit to
 # a Rust file leaves the step cached.
 #
-# With locked off the lockfile is the one the fetch layer resolved, so that
+# Without --locked the lockfile is the one the fetch layer resolved, so that
 # cargo-deny checks the crates that were downloaded.
 let rustDenyTree(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
   let files = workspace
     .skeletonOf(inputs)
     .withDirectory("/", inputs.source.filter(exclude: ["**/*.rs"]))
-  if (workspace.tool.locked) { files } else {
+  if (inputs.locked) { files } else {
     files.withFile(
       rustPathIn(workspace.path, "Cargo.lock"),
       workspace.fetchedOf(inputs).file(rustPathIn(workspace.workdir, "Cargo.lock")),
@@ -55,9 +55,9 @@ let rustDenyTree(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
 # The flags cargo-deny takes from the settings, before its subcommand. The
 # feature and target settings choose the dependency graph it checks, over
 # what deny.toml says of them.
-let rustDenyFlags(tool: Rust!): [String!]! {
+let rustDenyFlags(tool: Rust!, inputs: RustInputs!): [String!]! {
   let none: [String!]! = []
-  (if (tool.locked) { ["--locked"] } else { none })
+  (if (inputs.locked) { ["--locked"] } else { none })
     + (if (tool.target == null) { none } else { ["--target", tool.target ?? ""] })
     + (if (tool.features.length == 0) { none } else { ["--features", tool.features.join(",")] })
     + (if (tool.allFeatures) { ["--all-features"] } else { none })
@@ -89,8 +89,8 @@ let rustDenyContainer(workspace: RustWorkspace!, inputs: RustInputs!): Container
 # `cargo deny check` for some of its checks, with the flags of the settings.
 # cargo-deny never fetches: the crates come from the fetch layer, and the
 # advisories lane mounts the database.
-let rustDenyCommand(tool: Rust!, checks: [String!]!): [String!]! {
-  ["cargo", "deny"] + rustDenyFlags(tool) + ["check", "--disable-fetch"] + checks
+let rustDenyCommand(tool: Rust!, inputs: RustInputs!, checks: [String!]!): [String!]! {
+  ["cargo", "deny"] + rustDenyFlags(tool, inputs) + ["check", "--disable-fetch"] + checks
 }
 
 # What to tell the user of a cargo-deny command that rejected the workspace.
@@ -106,7 +106,7 @@ let rustDenyFailure(
 # The lane's step: the bans, licences and sources checks.
 let rustDenyStep(workspace: RustWorkspace!, inputs: RustInputs!): Container! {
   rustDenyContainer(workspace, inputs)
-    .withExec(rustDenyCommand(workspace.tool, rustDenyChecks), expect: ANY)
+    .withExec(rustDenyCommand(workspace.tool, inputs, rustDenyChecks), expect: ANY)
 }
 
 # Fails when cargo-deny rejects the workspace's dependencies for a ban, a

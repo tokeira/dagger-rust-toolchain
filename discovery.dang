@@ -122,6 +122,16 @@ let rustManifestDirectories(ws: Workspace!): [String!]! {
   )
 }
 
+# The directories that hold a Cargo.lock that .gitignore does not ignore: the
+# lockfiles the module reads.
+let rustLockfiles(ws: Workspace!): [String!]! {
+  ws
+    .directory("/", include: ["**/Cargo.lock"], gitignore: true)
+    .glob("**/Cargo.lock")
+    .filter { file => file.hasSuffix("/") == false }
+    .map { file => rustParent(file) }
+}
+
 # Directories that may be workspace roots: those holding a Cargo.toml with a
 # [workspace] table, or a Cargo.toml and a Cargo.lock, and the repository
 # root when it holds a Cargo.toml.
@@ -136,22 +146,20 @@ let rustCandidates(ws: Workspace!): [String!]! {
     .map { found => found.filePath }
     .filter { file => file == "Cargo.toml" or file.hasSuffix("/Cargo.toml") }
     .map { file => rustParent(file) }
-  let locked = ws
-    .directory("/", include: ["**/Cargo.lock"], gitignore: true)
-    .glob("**/Cargo.lock")
-    .filter { file => file.hasSuffix("/") == false }
-    .map { file => rustParent(file) }
+  let locked = rustLockfiles(ws)
   rustManifestDirectories(ws).filter { dir =>
     dir == "." or declared.contains(dir) or locked.contains(dir)
   }
 }
 
 # What one pass over the repository finds: every target path, the skeleton
-# of the whole repository, and the workspace roots in byte order.
+# of the whole repository, the workspace roots in byte order, and the
+# directories that hold a lockfile.
 type RustDiscovery {
   let targets: [String!]!
   let skeleton: Directory!
   let roots: [String!]!
+  let lockfiles: [String!]!
 }
 
 # The workspace roots of a repository, for the collection. A repository that
@@ -206,6 +214,7 @@ let rustDiscover(tool: Rust!, ws: Workspace!): RustDiscovery! {
         dir,
       )
     },
+    lockfiles: rustLockfiles(ws),
   )
 }
 

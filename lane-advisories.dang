@@ -30,7 +30,7 @@ let rustAdvisoriesStep(workspace: RustWorkspace!, inputs: RustInputs!): Containe
       rustCargoHome(workspace.tool) + "/" + rustAdvisoriesDatabasePath,
       rustAdvisoriesDatabase,
     )
-    .withExec(rustDenyCommand(workspace.tool, ["advisories"]), expect: ANY)
+    .withExec(rustDenyCommand(workspace.tool, inputs, ["advisories"]), expect: ANY)
 }
 
 # Fails when the advisory database has an advisory against a dependency of

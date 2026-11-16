@@ -34,8 +34,8 @@ let rustTestTail(output: String!): String! {
 
 # The flags of the settings as cargo-nextest takes them: --profile is its own
 # option, and Cargo's is --cargo-profile.
-let rustTestNextestFlags(tool: Rust!): [String!]! {
-  tool.cargoFlags.map { flag => if (flag == "--profile") { "--cargo-profile" } else { flag } }
+let rustTestNextestFlags(tool: Rust!, inputs: RustInputs!): [String!]! {
+  rustCargoFlags(tool, inputs).map { flag => if (flag == "--profile") { "--cargo-profile" } else { flag } }
 }
 
 # The container of the lane's Cargo commands that compile: the toolchain
@@ -58,6 +58,7 @@ let rustTestBuilder(
       targets: inputs.targets,
       source: view,
       formatFiles: inputs.formatFiles,
+      locked: inputs.locked,
     ),
     "test",
     rustTestCargo(
@@ -98,7 +99,7 @@ let rustTestCompiled(selection: RustPackages!): Container! {
       workspace,
       build,
       ["cargo", "test", "--no-run", "--message-format", "json-render-diagnostics"]
-        + tool.cargoFlags + selection.packageFlags(tool.test),
+        + rustCargoFlags(tool, selection.inputs) + selection.packageFlags(tool.test),
       rustCompileKept + "/test-binaries.jsonl",
       ["--keep", rustCompileKept, "--listing", "cargo"],
     )
@@ -107,7 +108,7 @@ let rustTestCompiled(selection: RustPackages!): Container! {
       workspace,
       rustTestWithNextest(tool, build),
       ["cargo", "nextest", "list", "--list-type", "binaries-only", "--message-format", "json"]
-        + rustTestNextestFlags(tool) + selection.packageFlags(tool.test),
+        + rustTestNextestFlags(tool, selection.inputs) + selection.packageFlags(tool.test),
       rustCompileKept + "/binaries-metadata.json",
       ["--keep", rustCompileKept, "--listing", "nextest"],
     )
@@ -396,7 +397,8 @@ let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
   let ran = rustCompileCargo(
     package.workspace,
     rustTestCompiled(selection),
-    ["cargo", "test", "--doc", "--no-fail-fast"] + tool.cargoFlags + selection.packageFlags(tool.test),
+    ["cargo", "test", "--doc", "--no-fail-fast"] + rustCargoFlags(tool, selection.inputs)
+      + selection.packageFlags(tool.test),
     "",
     [],
   )

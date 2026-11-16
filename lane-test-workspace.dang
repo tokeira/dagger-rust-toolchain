@@ -47,7 +47,8 @@ let rustTestWorkspaceRun(selection: RustPackages!): Container! {
     rustCompileCargo(
       workspace,
       build,
-      rustTestWorkspaceClear + ["cargo", "test", "--no-fail-fast"] + tool.cargoFlags
+      rustTestWorkspaceClear + ["cargo", "test", "--no-fail-fast"]
+        + rustCargoFlags(tool, selection.inputs)
         + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
       "",
       [],
@@ -58,7 +59,7 @@ let rustTestWorkspaceRun(selection: RustPackages!): Container! {
       rustTestWithNextest(tool, build),
       rustTestWorkspaceClear
         + ["cargo", "nextest", "run", "--no-fail-fast", "--failure-output", "immediate-final"]
-        + ["--no-tests", "pass"] + rustTestNextestFlags(tool) + selection.packageFlags(tool.test)
+        + ["--no-tests", "pass"] + rustTestNextestFlags(tool, selection.inputs) + selection.packageFlags(tool.test)
         + rustTestWorkspaceTarget,
       "",
       [],
@@ -73,7 +74,8 @@ let rustTestWorkspaceDoctests(selection: RustPackages!): Container! {
   rustCompileCargo(
     selection.workspace,
     rustTestWorkspaceRun(selection),
-    rustTestWorkspaceClear + ["cargo", "test", "--doc", "--no-fail-fast"] + tool.cargoFlags
+    rustTestWorkspaceClear + ["cargo", "test", "--doc", "--no-fail-fast"]
+      + rustCargoFlags(tool, selection.inputs)
       + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
     "",
     [],

@@ -56,7 +56,10 @@ let rustCheckRun(workspace: RustWorkspace!, inputs: RustInputs!): {{step: Contai
     let ran = rustCompileCargo(
       workspace,
       lane,
-      ["cargo", "check", "--quiet", "--workspace"] + rustDependenciesFlags(workspace.tool) + set,
+      ["cargo", "check", "--quiet", "--workspace"] + rustDependenciesFlags(
+        workspace.tool,
+        inputs,
+      ) + set,
       "/tmp/rust-check-output",
       [],
     )

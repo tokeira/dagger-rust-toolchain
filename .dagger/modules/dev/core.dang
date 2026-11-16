@@ -161,14 +161,46 @@ let devCoreSingle(run: DevRun!): [String!]! {
 # workspace.
 let devCoreLibrary(run: DevRun!): [String!]! {
   let passed: [String!]! = []
-  let workspace = devConsumer(run, "library", "locked = false\n")
+  let workspace = devConsumer(run, "library", "")
   devListed(workspace, run, [], devLinks([{{root: ".", packages: ["."]}}]))
   devStdout(workspace, run, ["check"])
+  let unlocked = devBuildOnly(
+    "dagger check --check=clippy over library",
+    devTraced(
+      # A file the engine has not seen, so that it calls the module.
+      workspace.withNewFile("/library/src/unseen.rs", "// " + run.next + "\n"),
+      run,
+      ["check", "--check=clippy"],
+    ),
+    "cargo clippy",
+  )
+  if (unlocked.contains("--locked")) {
+    raise devCheckFailed(
+      "dagger check --check=clippy over library",
+      "ran `" + unlocked + "`, which must not pass --locked: the workspace has no Cargo.lock",
+    )
+  }
   passed += [
     devHeld(
       "library: a package at the repository root with no [workspace] table and no "
-        + "Cargo.lock is the workspace \".\" with the package \".\", and under locked = "
-        + "false its seven checks pass",
+        + "Cargo.lock is the workspace \".\" with the package \".\"; under the default "
+        + "settings its seven checks pass, and Cargo runs without --locked",
+    ),
+  ]
+
+  # A Cargo.lock that is there and out of date: --locked still refuses it.
+  let stale = devConsumer(run, "single", "")
+    .withExec(["sed", "-i", "$ a [dependencies]", "/single/Cargo.toml"])
+    .withExec(["sed", "-i", "$ a cfg-if = \"1\"", "/single/Cargo.toml"])
+  devSays(
+    "dagger check --check=check over single with a dependency its Cargo.lock lacks",
+    devFailing(stale, run, ["check", "--check=check"]),
+    "--locked was passed to prevent this",
+  )
+  passed += [
+    devHeld(
+      "single: with a dependency that its Cargo.lock lacks, the check check fails under the "
+        + "default locked with Cargo's message that --locked was passed",
     ),
   ]
 

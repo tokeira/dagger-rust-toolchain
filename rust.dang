@@ -199,8 +199,9 @@ type Rust {
     """
     target: String = null,
     """
-    Run Cargo with --locked, so that a command fails rather than change
-    Cargo.lock.
+    Run Cargo with --locked in a workspace that has a Cargo.lock, so that a
+    command fails rather than change it. A workspace with no Cargo.lock, or
+    one that .gitignore ignores, runs without --locked whatever this says.
     """
     locked: Boolean! = true,
     """
@@ -303,10 +304,11 @@ type Rust {
   }
 
   """
-  Flags that every Cargo build command receives from the settings.
+  Flags that the settings give every Cargo build command.
 
-  They are --locked, --profile, --target and the feature flags. Each lane
-  adds its own package selection.
+  They are --locked, --profile, --target and the feature flags. This is the
+  settings' view: a workspace that has no Cargo.lock runs without --locked,
+  whatever is shown here. Each lane adds its own package selection.
   """
   cargoFlags: [String!]! {
     let none: [String!]! = []

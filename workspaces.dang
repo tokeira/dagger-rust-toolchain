@@ -68,6 +68,18 @@ type RustInputs {
   # The rustfmt configuration files of the directories above the workspace
   # root, which the fmt lane reads. lane-fmt.dang has the reason.
   let formatFiles: Directory!
+
+  # Whether Cargo runs with --locked: the locked setting, for a workspace
+  # that has a Cargo.lock at its root. Without one --locked could only fail,
+  # so Cargo resolves, as it does with the setting off.
+  let locked: Boolean!
+}
+
+# The flags that a Cargo build command of a workspace receives from the
+# settings: the settings' own, without --locked when the workspace has no
+# Cargo.lock.
+let rustCargoFlags(tool: Rust!, inputs: RustInputs!): [String!]! {
+  tool.cargoFlags.filter { flag => flag != "--locked" or inputs.locked }
 }
 
 """
@@ -123,6 +135,7 @@ type RustWorkspace {
     let targets = found.targets.filter { file =>
       rustUnder(file, path) and nested.any { root => rustUnder(file, root) } == false
     }
+    let locked = tool.locked and found.lockfiles.contains(path)
     if (tool.includeExtraFiles.length == 0) {
       RustInputs(
         toolchainFiles: ws.directory("/", include: toolchains),
@@ -130,6 +143,7 @@ type RustWorkspace {
         targets: targets,
         source: source,
         formatFiles: rustFmtConfigsAbove(ws, path),
+        locked: locked,
       )
     } else {
       # Extra files may hold packages the workspace depends on by path, so
@@ -146,6 +160,7 @@ type RustWorkspace {
         ).uniq,
         source: source.withDirectory("/", extra),
         formatFiles: rustFmtConfigsAbove(ws, path),
+        locked: locked,
       )
     }
   }
@@ -205,7 +220,7 @@ type RustWorkspace {
   # downloaded into Cargo's home, and the recipe mounted. The workspace has
   # one, and every lane takes its crates from it.
   let fetchedOf(inputs: RustInputs!): Container! {
-    rustFetchLayer(tool, toolchainOf(inputs, []), mountPath, recipeOf(inputs))
+    rustFetchLayer(tool, toolchainOf(inputs, []), mountPath, recipeOf(inputs), inputs.locked)
   }
 
   # A lane's own container with the fetch layer's crates in Cargo's home and

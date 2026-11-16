@@ -104,11 +104,11 @@ let rustCompileHelper(platform: Platform!): File! {
     .file("/var/cache/rust/helper/" + triple + "/release/rust-lane-helper")
 }
 
-# A compile lane's source view: the workspace's source, and with locked off
+# A compile lane's source view: the workspace's source, and without --locked
 # the Cargo.lock that the fetch layer resolved in place of the source's. The
 # lockfile is read as text, so the view is keyed on what it says.
 let rustCompileView(workspace: RustWorkspace!, inputs: RustInputs!): Directory! {
-  if (workspace.tool.locked) { inputs.source } else {
+  if (inputs.locked) { inputs.source } else {
     inputs.source.withNewFile(
       rustPathIn(workspace.path, "Cargo.lock"),
       workspace.fetchedOf(inputs).file(rustDependenciesLock(workspace)).contents,

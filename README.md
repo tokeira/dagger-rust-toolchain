@@ -239,7 +239,7 @@ has a `deny.toml`, and passes without running anything when it has none. It fail
   `Cargo.lock` or another file that is not Rust source changes. An edit to a Rust file
   leaves it cached, and so does anything that RustSec publishes: only a change to the
   repository changes its verdict.
-- `locked` passes `--locked`, and `target`, `features`, `allFeatures` and
+- `locked` passes `--locked` where the workspace has a `Cargo.lock`, and `target`, `features`, `allFeatures` and
   `noDefaultFeatures` pass cargo-deny's flags of the same names, which choose the
   dependency graph it checks over what `deny.toml` says.
 
@@ -286,7 +286,7 @@ Settings are the constructor's arguments, set under `[modules.rust.settings]`.
 | `checkNoDefaultFeatures` | bool | `true` | Build the workspace under `--no-default-features` in the check lane. |
 | `buildProfile` | string | Cargo's default | Passed as `--profile`. |
 | `target` | string | Cargo's default | One target triple, passed as `--target`. The toolchain layer adds its standard library. |
-| `locked` | bool | `true` | Pass `--locked`. |
+| `locked` | bool | `true` | Pass `--locked` in a workspace that has a `Cargo.lock`, so that an out-of-date lockfile fails. A workspace with no `Cargo.lock`, or one that `.gitignore` ignores, runs without `--locked`, and Cargo resolves its dependencies in the fetch layer. |
 | `buildJobs` | integer | Cargo's choice, one job for each processor | Cargo's job count, as `CARGO_BUILD_JOBS`, in every step that compiles. `0` is refused. |
 | `cargoEnvironment` | list | `[]` | Environment variables, each as `NAME=value`, for the steps that compile the workspace or run its tests, such as `["CI=1"]`. Never a secret: see [Large workspaces](#large-workspaces). |
 | `volumePrefix` | string | The repository's name | Start of the name of every [cache volume](#cache-volumes). A workspace that is not at the repository root adds its path. A new value gives every lane empty volumes. |

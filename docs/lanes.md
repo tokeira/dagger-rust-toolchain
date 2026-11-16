@@ -85,6 +85,7 @@ its path in the repository. None runs a container.
 | `targets` | Paths of the files that make Cargo targets: `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`, `tests/*.rs`, `examples/*.rs`, `benches/*.rs`, `build.rs`. | The set of paths, not the files' contents. |
 | `toolchainFiles` | `rust-toolchain` and `rust-toolchain.toml` of the workspace root and of the directories above it. | Those files. |
 | `formatFiles` | `rustfmt.toml` and `.rustfmt.toml` of the directories above the workspace root. The workspace's own are in `source`. | Those files. |
+| `locked` | Whether Cargo gets `--locked`: the `locked` setting, when the workspace has a `Cargo.lock` at its root. It is a value, not a view. | Its value. |
 
 ### `RustWorkspace`
 
@@ -124,10 +125,17 @@ A `RustPackages` is the selection a package check receives.
 
 ### `Rust`, the settings
 
-`workspace.tool` reads every setting: `locked`, `features`, `clippyArgs`, `testRunner` and
-the rest. `workspace.tool.cargoFlags` is the list every Cargo build command gets:
-`--locked`, `--profile`, `--target` and the feature flags. Add the package selection
-yourself.
+`workspace.tool` reads every setting: `features`, `clippyArgs`, `testRunner` and the
+rest. `rustCargoFlags(workspace.tool, inputs)` is the list every Cargo build command
+gets: `--locked`, `--profile`, `--target` and the feature flags. Add the package
+selection yourself.
+
+Read `inputs.locked`, never `tool.locked`. It is the `locked` setting for a workspace
+that has a `Cargo.lock` at its root, among the files the module reads, and false for one
+that has none: `--locked` could only fail there, so Cargo resolves, as it does with the
+setting off. A lockfile that is there and out of date still fails under `--locked`.
+`rustCargoFlags` leaves `--locked` out accordingly, and so do `rustDependenciesFlags` and
+`rustDenyFlags`. Below, "with `locked` off" means that `inputs.locked` is false.
 
 Two settings reach a step through its container, not its command, with two functions of
 `layers.dang`:

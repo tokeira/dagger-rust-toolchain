@@ -102,7 +102,7 @@ let rustClippyRun(selection: RustPackages!): Container! {
     ["cargo", "clippy", "--quiet"]
       + selection.packageFlags(tool.clippy)
       + ["--all-targets", "--keep-going", "--message-format=json"]
-      + tool.cargoFlags
+      + rustCargoFlags(tool, selection.inputs)
       + ["--", "--no-deps"]
       + tool.clippyArgs,
     rustClippyMessages,
