@@ -42,6 +42,37 @@ $ dagger call rust workspace --path . fetched        # a layer, to inspect it
 
 [Large workspaces](#large-workspaces) has the settings for a workspace of many packages.
 
+## First run
+
+The first `dagger check --rust` builds each workspace's [layers](#layers): it installs
+the toolchain, downloads the crates and compiles the dependencies. Later runs reuse them,
+and compile only what changed since.
+
+### The settings most repositories change
+
+| Setting | When to change it |
+| --- | --- |
+| [`clippyArgs`](#clippy) | clippy denies warnings by default. Set `clippyArgs = []` to allow them. |
+| [`checkAllFeatures`, `checkNoDefaultFeatures`](#check) | Both are on by default, so `check` builds the workspace under `--all-features` and under `--no-default-features`. Turn one off where that build turns on a feature that cannot build in a plain container. tokeira/tokeira turns both off. |
+| [`wholeWorkspace`](#one-item-for-the-workspace) | Turn it on to have one clippy check and one test check for each workspace, so that the check names stay the same as crates come and go. |
+| [`workspaceRoots`](#workspaces-and-packages) | Leave out fixtures and vendored workspaces, as `["**", "!fixtures"]` does. |
+| [`includeExtraFiles`](#settings) | The build reads files outside the workspace. |
+| [`systemPackages`](#settings) | The build needs Debian packages. |
+| [`cargoEnvironment`](#fewer-builds-fewer-jobs) | The build or the tests need environment variables. |
+| [`fmtToolchain`](#settings) | A `rustfmt.toml` uses nightly options. |
+
+[Settings](#settings) has every setting.
+
+### Gating merges on Dagger Cloud
+
+With [Cloud Checks](#on-ci) on, each check has a commit status of its own.
+
+- Require each check by its status name.
+- Never require the `Run Dagger Checks` total: it can be green while a check fails.
+- Copy the exact names from a commit's statuses, because a name can carry its trigger: a
+  push to a branch posts `rust/workspaces/check (push)`, where a push to main posts
+  `rust/workspaces/check`.
+
 ## Workspaces and packages
 
 A workspace is a directory whose `Cargo.toml` has a `[workspace]` table, or a package with
