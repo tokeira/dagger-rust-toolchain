@@ -625,6 +625,8 @@ of the runner's report.
 
 The module is the `.dang` files at the repository root. [docs/lanes.md](docs/lanes.md)
 describes its layout, the contract a lane follows, and the checks.
+[CONTRIBUTING.md](CONTRIBUTING.md) says how to propose a change, and
+[SECURITY.md](SECURITY.md) how to report a vulnerability.
 
 The dev module, `.dagger/modules/dev`, is written in Dang, like the module, so nothing
 is compiled before a check starts. It is the workspace's main module, so its checks and
@@ -634,7 +636,7 @@ its generator run from the repository root:
 $ dagger check                       # every check
 $ dagger check -l                    # the checks, each with what it covers
 $ dagger check --check=test-lane     # one check
-$ dagger generate                    # format the Dang source
+$ dagger generate -y                 # format the Dang source
 ```
 
 They need the `v1.0.0-beta.27` CLI and an engine of that release, and network access to
@@ -660,11 +662,11 @@ assertion that does not hold.
 | `dang-format/stale` | That the Dang source is formatted: the module's, and the dev module's. |
 
 After a change to a `.dang` file, the module's or the dev module's, run `dagger
-generate` before `dagger check`: it formats the file, which `dang-format/stale` would
+generate -y` before `dagger check`: it formats the file, which `dang-format/stale` would
 otherwise fail. The helper, in `helper/`, is a Rust crate with no dependencies: `cargo
 test` there runs its tests, and so does `cache-volumes`.
 
-`dagger generate` also formats the Dang source with `dang fmt`. The generator
+`dagger generate -y` also formats the Dang source with `dang fmt`. The generator
 `dang-format` builds `dang` from the commit of Dang that the `v1.0.0-beta.27` engine
 embeds, so that it formats the language the engine reads.
 
