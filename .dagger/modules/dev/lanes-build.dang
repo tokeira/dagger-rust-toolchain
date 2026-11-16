@@ -270,19 +270,21 @@ let devBuildClippy(run: DevRun!): [String!]! {
   devSays(check, output, "equal expressions as operands to `==`")
   devSays(check, output, "rust: clippy failed in blocked:")
   devSays(check, output, "not checked: blocked by lints-faulty")
+  devSays(check, output, "rust: clippy failed in untidy:")
+  devSays(check, output, "unneeded `return` statement")
   devSilent(check, output, "clippy failed in clean")
-  devSilent(check, output, "clippy failed in untidy")
   let command = devBuildOnly(check, devBuildTracedAny(workspace, run, all), "cargo clippy")
   let expected = "cargo clippy --quiet --workspace --all-targets --keep-going "
-    + "--message-format=json --locked -- --no-deps"
-  if (command.hasPrefix(expected) == false) {
+    + "--message-format=json --locked -- --no-deps -D warnings "
+  if (command != expected) {
     raise devCheckFailed(check, "ran `" + command + "`, not `" + expected + "`")
   }
   passed += [
     devHeld(
-      "build-lints: one `" + expected + "` runs for the four packages; faulty fails with "
-        + "clippy's error, blocked is \"not checked: blocked by lints-faulty\", and clean and "
-        + "untidy, which has a warning, pass",
+      "build-lints: by default one `" + expected + "` runs for the four packages; faulty "
+        + "fails with clippy's error, blocked is \"not checked: blocked by lints-faulty\", "
+        + "untidy fails with its warning, which the default clippyArgs denies, and clean "
+        + "passes",
     ),
   ]
 
@@ -343,22 +345,47 @@ let devBuildClippy(run: DevRun!): [String!]! {
     ),
   ]
 
-  let denying = devConfigured(
-    workspace,
-    run,
-    "build-lints",
-    "clippyArgs = [\"-D\", \"warnings\"]\n",
-  )
-  let denied = devFailing(denying, run, all)
-  let deniedCheck = "dagger check --check=clippy under clippyArgs"
+  # An empty clippyArgs is a value of its own, not the default: clippy then
+  # reports the warning, and the package passes.
+  let untidy = ["check", "--check=clippy", "--rust-package=untidy"]
+  let denied = devFailing(workspace, run, untidy)
+  let deniedCheck = "dagger check --rust-package=untidy under the default clippyArgs"
   devSays(deniedCheck, denied, "rust: clippy failed in untidy:")
   devSays(deniedCheck, denied, "unneeded `return` statement")
-  devSilent(deniedCheck, denied, "clippy failed in clean")
+  let allowing = devConfigured(workspace, run, "build-lints", "clippyArgs = []\n")
+  let allowedCheck = "dagger check --check=clippy under clippyArgs = []"
+  devStdout(allowing, run, untidy)
+  let allowed = devFailing(allowing, run, all)
+  devSays(allowedCheck, allowed, "rust: clippy failed in faulty:")
+  devSilent(allowedCheck, allowed, "clippy failed in untidy")
+  devSilent(allowedCheck, allowed, "clippy failed in clean")
+  let bare = devBuildOnly(
+    allowedCheck,
+    devBuildTracedAny(allowing, run, all),
+    "cargo clippy",
+  )
+  if (bare.hasSuffix(" -- --no-deps ") == false) {
+    raise devCheckFailed(allowedCheck, "ran `" + bare + "`, which must end with --no-deps")
+  }
+  let messages = devStdout(
+    allowing,
+    run,
+    devWorkspaceCall(
+      ".",
+      ["compiled", "--lane", "clippy", "file", "--path", "/tmp/rust-clippy-messages.json", "contents"],
+    ),
+  )
+  devSays("clippy's messages under clippyArgs = []", messages, "unneeded `return` statement")
   # The engine answers a package check that passed before, over the same
   # files and the whole selection, without calling the module. A file it has
   # not seen makes it call.
   let unseen = workspace.withNewFile("/build-lints/clean/src/unseen.rs", "// " + run.next + "\n")
-  let without = devConfigured(unseen, run, "build-lints", "clippy = [\"**\", \"!faulty\"]\n")
+  let without = devConfigured(
+    unseen,
+    run,
+    "build-lints",
+    "clippyArgs = []\nclippy = [\"**\", \"!faulty\"]\n",
+  )
   let named = devBuildOnly(
     "dagger check under clippy",
     devTraced(without, run, all),
@@ -372,9 +399,10 @@ let devBuildClippy(run: DevRun!): [String!]! {
   }
   passed += [
     devHeld(
-      "build-lints: under clippyArgs = [\"-D\", \"warnings\"] untidy fails with its warning; "
-        + "under clippy = [\"**\", \"!faulty\"] clippy names the other three packages, and all "
-        + "four checks pass",
+      "build-lints: the check of untidy alone fails with its warning by default; under "
+        + "clippyArgs = [] it passes, clippy's command ends with --no-deps, and its messages "
+        + "still hold the warning; with clippy = [\"**\", \"!faulty\"] as well, clippy names "
+        + "the other three packages, and all four checks pass",
     ),
   ]
 
@@ -933,7 +961,7 @@ let devBuildLayouts(run: DevRun!): [String!]! {
   ]
 
   devStdout(
-    devConsumer(run, "build-kinds", "clippyArgs = [\"-D\", \"warnings\"]\n"),
+    devConsumer(run, "build-kinds", ""),
     run,
     devBuildChecks,
   )
@@ -941,7 +969,8 @@ let devBuildLayouts(run: DevRun!): [String!]! {
     devHeld(
       "build-kinds: a workspace with a procedural macro, a build script, a binary, an "
         + "example, an integration test and a benchmark without the test harness passes the "
-        + "three checks, with warnings denied: each kind of target has a stub that compiles",
+        + "three checks, with warnings denied by default: each kind of target has a stub "
+        + "that compiles",
     ),
   ]
 

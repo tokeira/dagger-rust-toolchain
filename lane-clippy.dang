@@ -10,8 +10,10 @@
 # It runs once for a selection. With --keep-going Cargo compiles everything
 # that does not need a package that failed, and with JSON messages each
 # diagnostic names its package. A package fails when clippy reports an error
-# in it, and is "not checked" when a package it needs failed. Warnings fail
-# nothing unless clippyArgs or the workspace's own lint policy deny them.
+# in it, and is "not checked" when a package it needs failed. The default
+# clippyArgs, ["-D", "warnings"], makes each warning an error. Under
+# clippyArgs = [] a warning fails nothing, unless the workspace's own lint
+# policy denies it.
 #
 # clippy's --no-deps keeps its lints to the packages the command names. A
 # member that is compiled only because a named package needs it is compiled

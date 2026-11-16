@@ -30,6 +30,11 @@ let devCacheLanes: [{{lane: String!, target: String!, command: String!}}!]! = [
   {{lane: "test", target: devTestTarget, command: "cargo nextest list"}},
 ]
 
+# The start of a sed command that puts a line before a file's test module.
+# clippy warns of an item after that module, and the default clippyArgs deny
+# warnings, so an edit that must leave every check passing adds its line here.
+let devCacheBeforeTests: String! = "/^#\\[cfg(test)\\]$/i "
+
 # `dagger check` for the four compile lanes at once.
 let devCacheChecks: [String!]! = [
   "check",
@@ -224,7 +229,7 @@ let devCache(run: DevRun!): [String!]! {
   let library = "/" + devCacheSuite + "/crates/lone/src/lib.rs"
   let added = edited
     .withNewFile(module, "#[test]\nfn left_behind() {\n    panic!(\"left behind\");\n}\n")
-    .withExec(["sed", "-i", "$ a mod extra;", library])
+    .withExec(["sed", "-i", devCacheBeforeTests + "mod extra;", library])
   let addedOutput = devCacheFailing(added, run, devCacheChecks)
   let addedCheck = "the checks with a new module in crates/lone whose test fails"
   devCacheSameVerdicts(addedCheck, addedOutput, devCacheVerdictsOf([], ["crates/lone"]))
@@ -284,7 +289,7 @@ let devCache(run: DevRun!): [String!]! {
     ["check", "doc", "clippy crates/mid", "clippy crates/tool"],
     ["crates/base", "crates/lone", "crates/mid", "crates/tool"],
   )
-  let error = "$ a pub fn broken() -> u64 { \"no number\" }"
+  let error = devCacheBeforeTests + "pub fn broken() -> u64 { \"no number\" }"
   let middle = "/" + devCacheSuite + "/crates/mid/src/lib.rs"
   let broken = edited.withExec(["sed", "-i", error, middle])
   let brokenOutput = devCacheFailing(broken, run, devCacheChecks)
@@ -417,7 +422,7 @@ let devCacheLinted(run: DevRun!): [String!]! {
   devCacheSameVerdicts(
     lintsCheck,
     lintsOutput,
-    devCacheLintVerdicts(["blocked", "faulty"], ["clean", "untidy"]),
+    devCacheLintVerdicts(["blocked", "faulty", "untidy"], ["clean"]),
   )
   devSays(lintsCheck, lintsOutput, "equal expressions as operands to `==`")
   devSays(lintsCheck, lintsOutput, "not checked: blocked by lints-faulty")
@@ -425,8 +430,9 @@ let devCacheLinted(run: DevRun!): [String!]! {
     devHeld(
       "build-lints: after the clippy check of the package blocked alone, which compiles "
         + "faulty without linting it, the clippy checks of every package over the same tree "
-        + "lint faulty: it fails, and blocked is \"not checked: blocked by lints-faulty\"; a "
-        + "command that names other packages has a target volume of its own under the same name",
+        + "lint faulty: it fails, blocked is \"not checked: blocked by lints-faulty\", and "
+        + "untidy fails with its warning, which the default clippyArgs denies; a command "
+        + "that names other packages has a target volume of its own under the same name",
     ),
   ]
 

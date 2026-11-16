@@ -388,24 +388,26 @@ let devWholeClippy(run: DevRun!): [String!]! {
     "equal expressions as operands to `==`",
     "blocked:",
     "not checked: blocked by lints-faulty",
+    "untidy:",
+    "unneeded `return` statement",
   ]) { said =>
     devSays(check, output, said)
   }
   devSilent(check, output, "clean:")
-  devSilent(check, output, "untidy:")
   let command = devBuildOnly(check, devBuildTracedAny(workspace, run, checks), "cargo clippy")
   let expected = "cargo clippy --quiet --workspace --all-targets --keep-going "
-    + "--message-format=json --locked -- --no-deps"
-  if (command.hasPrefix(expected) == false) {
+    + "--message-format=json --locked -- --no-deps -D warnings "
+  if (command != expected) {
     raise devCheckFailed(check, "ran `" + command + "`, not `" + expected + "`")
   }
   passed += [
     devHeld(
       "build-lints: under wholeWorkspace = true the workspace has one clippy check, which "
         + "fails with \"rust: clippy failed in .:\" and, under each package's directory, what "
-        + "the packages' own checks say: clippy's error in faulty, and \"not checked: blocked "
-        + "by lints-faulty\" in blocked; it names neither clean nor untidy; the command is `"
-        + expected + "`, the one the packages' checks share",
+        + "the packages' own checks say: clippy's error in faulty, \"not checked: blocked by "
+        + "lints-faulty\" in blocked, and the warning in untidy that the default clippyArgs "
+        + "denies; it does not name clean; the command is `" + expected
+        + "`, the one the packages' checks share",
     ),
   ]
 
@@ -413,7 +415,7 @@ let devWholeClippy(run: DevRun!): [String!]! {
     workspace.withNewFile("/build-lints/clean/src/unseen.rs", "// " + run.next + "\n"),
     run,
     "build-lints",
-    devWholeSetting + "clippy = [\"**\", \"!faulty\"]\n",
+    devWholeSetting + "clippyArgs = []\nclippy = [\"**\", \"!faulty\"]\n",
   )
   let named = devBuildOnly(
     "dagger check --check=clippy under wholeWorkspace and clippy",
@@ -429,8 +431,8 @@ let devWholeClippy(run: DevRun!): [String!]! {
   passed += [
     devHeld(
       "build-lints: under wholeWorkspace the clippy setting still chooses the packages: with "
-        + "clippy = [\"**\", \"!faulty\"] the command names the other three with -p, and the "
-        + "check passes",
+        + "clippy = [\"**\", \"!faulty\"] the command names the other three with -p, and under "
+        + "clippyArgs = [] the check passes",
     ),
   ]
   passed

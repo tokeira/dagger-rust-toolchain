@@ -671,6 +671,11 @@ lane's volumes, on the check flavour of the dependency layer, with Cargo's JSON 
 kept in a file of the step. `rustClippyStep` sorts them into the per-package texts in
 Dang, only when the command failed. A run that passes costs each check one exit code.
 
+`clippyArgs` is `["-D", "warnings"]` by default, so clippy reports each warning as an
+error, and the package it is in fails. An empty list is a value of its own, not the
+default: under `clippyArgs = []` the command ends with `--no-deps`, and a warning fails
+nothing unless the workspace's own lint policy denies it.
+
 A warm volume changes no verdict. Cargo names a member it finds fresh among its
 artifacts, as it names one it compiled, and a member with an error is never fresh: Cargo
 compiles it again and reports the error again. The packages the command names,

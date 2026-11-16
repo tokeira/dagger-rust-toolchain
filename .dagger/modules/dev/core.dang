@@ -110,20 +110,24 @@ let devCoreSingle(run: DevRun!): [String!]! {
     ),
   ]
 
+  devPrints(workspace, run, ["call", "rust", "clippy-args"], ["-D", "warnings"])
+  let allowing = devConfigured(workspace, run, "single", "clippyArgs = []\n")
+  devPrints(allowing, run, ["call", "rust", "clippy-args"], [])
   let linting = devConfigured(
     workspace,
     run,
     "single",
-    "clippyArgs = [\"-D\", \"warnings\"]\ntestRunner = \"cargo\"\n",
+    "clippyArgs = [\"-W\", \"clippy::pedantic\"]\ntestRunner = \"cargo\"\n",
   )
-  devPrints(linting, run, ["call", "rust", "clippy-args"], ["-D", "warnings"])
+  devPrints(linting, run, ["call", "rust", "clippy-args"], ["-W", "clippy::pedantic"])
   devPrints(linting, run, ["call", "rust", "test-runner"], ["cargo"])
   let bogus = devConfigured(workspace, run, "single", "testRunner = \"bogus\"\n")
   devRefused(bogus, run, flags, "rust: testRunner must be \"nextest\" or \"cargo\": bogus")
   passed += [
     devHeld(
-      "single: clippyArgs and testRunner reach the module, and a testRunner other than "
-        + "nextest or cargo is refused",
+      "single: clippyArgs is [\"-D\", \"warnings\"] by default and empty under clippyArgs = "
+        + "[]; clippyArgs and testRunner reach the module, and a testRunner other than nextest "
+        + "or cargo is refused",
     ),
   ]
 

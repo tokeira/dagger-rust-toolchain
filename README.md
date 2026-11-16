@@ -26,7 +26,6 @@ source = "github.com/tokeira/dagger-rust-toolchain@v0.2.0"
 
 [modules.rust.settings]
 fmtToolchain = "nightly-2026-06-16"
-clippyArgs = ["-D", "warnings"]
 includeExtraFiles = ["proto/**"]
 ```
 
@@ -122,8 +121,9 @@ $ cargo clippy <packages> --all-targets --keep-going --message-format=json <sett
 `<packages>` is `--workspace`, or `-p <name>` for each package when the selection or the
 `clippy` setting leaves some out. Each package's check then reads its own share:
 
-- A package fails with the errors clippy reports in it. Warnings fail nothing, unless
-  `clippyArgs` or the workspace's own lint policy denies them.
+- A package fails with the errors clippy reports in it. Under the default `clippyArgs`,
+  `["-D", "warnings"]`, each warning is an error. Under `clippyArgs = []` a warning fails
+  nothing, unless the workspace's own lint policy denies it.
 - A package that needs a member whose library did not compile is `not checked: blocked by
   <member>`.
 - `--keep-going` lets every other package finish, and pass.
@@ -231,7 +231,7 @@ Settings are the constructor's arguments, set under `[modules.rust.settings]`.
 | `wholeWorkspace` | bool | `false` | Treat each workspace's packages as one item: one `fmt`, one `clippy` and one `test` for the workspace, and its tests run together over a writable copy of the whole repository. See [Large workspaces](#large-workspaces). |
 | `test` | patterns | `["**"]` | Packages to test. |
 | `clippy` | patterns | `["**"]` | Packages to lint. |
-| `clippyArgs` | list | `[]` | Arguments after `--`, such as `["-D", "warnings"]`. |
+| `clippyArgs` | list | `["-D", "warnings"]` | Arguments after `--`. The default denies warnings, and `[]` allows them. |
 | `testRunner` | `"nextest"` or `"cargo"` | `"nextest"` | Test runner: cargo-nextest, or the test binaries run as `cargo test` runs them. |
 | `includeExtraFiles` | patterns | `[]` | Files outside the workspace that its build reads, such as `proto/**`, as patterns relative to the repository root. A package among them can be a path dependency. |
 | `mountPath` | path | `/src/<workspace name>` | Where the repository is mounted. A fixed path keeps compiled outputs the same on every engine. |

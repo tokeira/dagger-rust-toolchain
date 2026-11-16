@@ -3,7 +3,7 @@
 
 /// Whether a number is even.
 pub fn even(number: u64) -> bool {
-    number % 2 == 0
+    number.is_multiple_of(2)
 }
 
 #[cfg(test)]

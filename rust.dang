@@ -237,9 +237,10 @@ type Rust {
     """
     clippy: [String!]! = ["**"],
     """
-    Arguments passed to clippy after "--", e.g. ["-D", "warnings"].
+    Arguments passed to clippy after "--". The default denies warnings, and
+    [] allows them.
     """
-    clippyArgs: [String!]! = [],
+    clippyArgs: [String!]! = ["-D", "warnings"],
     """
     Test runner: "nextest" or "cargo".
     """
