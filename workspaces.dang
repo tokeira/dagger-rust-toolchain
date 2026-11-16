@@ -71,8 +71,8 @@ type RustInputs {
 }
 
 """
-A Cargo workspace: a root Cargo.toml with a [workspace] table, or a package
-with its own Cargo.lock.
+A Cargo workspace: a root Cargo.toml with a [workspace] table, a package with
+its own Cargo.lock, or the package at the repository root.
 """
 type RustWorkspace {
   """

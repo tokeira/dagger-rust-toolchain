@@ -357,9 +357,22 @@ or a download that failed.
 
 ## Discovery and the `workspaceRoots` setting
 
-`rustDiscover` in `discovery.dang` keeps the candidates that `workspaceRoots` selects,
-with `rustSelects`, before it asks Cargo about any of them. `cargo metadata` therefore
-never runs in a root that the setting leaves out.
+`rustCandidates` in `discovery.dang` offers the directories that may be workspace roots:
+one whose `Cargo.toml` has a `[workspace]` table, one that holds a `Cargo.toml` and a
+`Cargo.lock` that `.gitignore` does not ignore, and the repository root when it holds a
+`Cargo.toml`. The root needs neither a table nor a lockfile, so that a library of one
+package is found. The other manifests are not all offered: a package kept for a test,
+below a package, would be a workspace of its own.
+
+`rustDiscover` keeps the candidates that `workspaceRoots` selects, with `rustSelects`,
+before it asks Cargo about any of them. `cargo metadata` therefore never runs in a root
+that the setting leaves out.
+
+`rustRoots` gives the roots to the `workspaces` collection, and raises when the
+repository has Cargo manifests and no root: with the rule, or with the setting when
+`workspaceRoots` leaves candidates out. A check over an empty collection passes, so
+without this a repository the module cannot see would be green. A repository with no
+manifest at all has an empty collection, and fails nothing.
 
 The setting chooses roots, not packages and not files. A workspace still has every member
 Cargo gives it, and its `RustInputs` still hold every file below its root that is not in
@@ -1002,7 +1015,7 @@ assertion that does not hold.
 
 | Check | Function, in `.dagger/modules/dev` | Asserts | Fixtures |
 | --- | --- | --- | --- |
-| `single-package` | `devCoreSingle`, in `core.dang` | Discovery of a single package, the check addresses, and every setting. | `single` |
+| `single-package` | `devCoreSingle`, in `core.dang` | Discovery of a single package, the check addresses, and every setting. A package at the root with no `[workspace]` table and no `Cargo.lock`, and the failure of a repository whose manifests make no workspace. | `single`, `library` |
 | `workspace-members` | `devCoreMembers`, in `core.dang` | The collections of a workspace of several members, the `clippy` and `test` settings, and the toolchain and fetch layers. | `members` |
 | `two-workspaces` | `devCorePair`, in `core.dang` | Two workspaces in one repository: selection, default volume prefixes, and separate inputs. | `pair` |
 | `nested-workspaces` | `devCoreNested`, in `core.dang` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. | `nested` |

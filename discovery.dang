@@ -112,15 +112,26 @@ let rustMetadata(tool: Rust!, skeleton: Directory!, at: String!): {{workspace_ro
   JSON.decode(ran.stdout) :: {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!}}!]!}}!
 }
 
+# The directories that hold a Cargo.toml, in byte order.
+let rustManifestDirectories(ws: Workspace!): [String!]! {
+  rustSorted(
+    rustDiscoveryManifests(ws)
+      .glob("**/Cargo.toml")
+      .filter { file => file.hasSuffix("/") == false }
+      .map { file => rustParent(file) },
+  )
+}
+
 # Directories that may be workspace roots: those holding a Cargo.toml with a
-# [workspace] table, or a Cargo.toml and a Cargo.lock.
+# [workspace] table, or a Cargo.toml and a Cargo.lock, and the repository
+# root when it holds a Cargo.toml.
+#
+# The root needs neither. A library that is one package often has no
+# [workspace] table and keeps Cargo.lock out of Git, and its manifest is at
+# the root. Other manifests are not all offered: a package kept for a test,
+# below a package, would then be a workspace of its own.
 let rustCandidates(ws: Workspace!): [String!]! {
-  let manifests = rustDiscoveryManifests(ws)
-  let packages = manifests
-    .glob("**/Cargo.toml")
-    .filter { file => file.hasSuffix("/") == false }
-    .map { file => rustParent(file) }
-  let declared = manifests
+  let declared = rustDiscoveryManifests(ws)
     .search(pattern: `^\s*\[\s*workspace\s*[\].]`, filesOnly: true).{{filePath}}
     .map { found => found.filePath }
     .filter { file => file == "Cargo.toml" or file.hasSuffix("/Cargo.toml") }
@@ -130,9 +141,9 @@ let rustCandidates(ws: Workspace!): [String!]! {
     .glob("**/Cargo.lock")
     .filter { file => file.hasSuffix("/") == false }
     .map { file => rustParent(file) }
-  rustSorted(
-    packages.filter { dir => declared.contains(dir) or locked.contains(dir) },
-  )
+  rustManifestDirectories(ws).filter { dir =>
+    dir == "." or declared.contains(dir) or locked.contains(dir)
+  }
 }
 
 # What one pass over the repository finds: every target path, the skeleton
@@ -143,6 +154,28 @@ type RustDiscovery {
   let roots: [String!]!
 }
 
+# The workspace roots of a repository, for the collection. A repository that
+# has Cargo manifests and no workspace root fails here, with the rule: its
+# checks would otherwise pass with nothing to check. A repository with no
+# manifest at all has no workspace, and fails nothing.
+let rustRoots(tool: Rust!, ws: Workspace!): [String!]! {
+  let roots = rustDiscover(tool, ws).roots
+  let manifests = rustManifestDirectories(ws)
+  if (roots.length > 0 or manifests.length == 0) { roots } else {
+    let candidates = rustCandidates(ws)
+    if (candidates.length > 0 and rustConsidered(tool, candidates).length < candidates.length) {
+      raise "rust: the workspaceRoots setting leaves no Cargo workspace to check. It is "
+        + tool.workspaceRoots.join(", ") + ", and the directories that may be workspace "
+        + "roots are " + candidates.join(", ")
+    } else {
+      raise "rust: the repository has Cargo manifests, but no Cargo workspace. A directory is "
+        + "a workspace root when its Cargo.toml has a [workspace] table, when it holds a "
+        + "Cargo.lock that .gitignore does not ignore, or when it is the repository root. The "
+        + "manifests are in " + manifests.join(", ")
+    }
+  }
+}
+
 # The candidates that the workspaceRoots setting selects, by the rules of the
 # test and clippy settings: a pattern selects its directory and everything
 # below it, and an exclusion wins.
@@ -151,7 +184,8 @@ let rustConsidered(tool: Rust!, candidates: [String!]!): [String!]! {
 }
 
 # Workspace roots are the candidates that Cargo names as the root of their
-# own workspace. A member that keeps a stray Cargo.lock is not one.
+# own workspace. A member that keeps a stray Cargo.lock is not one, and
+# neither is a root manifest that Cargo places in a workspace above it.
 #
 # The workspaceRoots setting narrows the candidates first, so Cargo never
 # loads a root that the setting leaves out: a project that Cargo cannot load

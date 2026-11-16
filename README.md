@@ -93,11 +93,24 @@ on a new beta.
 
 ## Workspaces and packages
 
-A workspace is a directory whose `Cargo.toml` has a `[workspace]` table, or a package with
-its own `Cargo.lock`. Cargo decides: a candidate is a workspace when `cargo metadata` names
-it as its own workspace's root, so a member that keeps a stray `Cargo.lock` is not one.
-The member packages come from `cargo metadata --no-deps` too, so Cargo's rules for member
+A directory may be a workspace root when one of these holds:
+
+- its `Cargo.toml` has a `[workspace]` table;
+- it holds a `Cargo.toml` and a `Cargo.lock` that `.gitignore` does not ignore;
+- it is the repository root, and holds a `Cargo.toml`.
+
+So a library that is one package at the repository root is a workspace, with or without a
+lockfile. A package below the root, with no `[workspace]` table and no committed
+`Cargo.lock`, is not: a package kept for a test would otherwise be a workspace of its own.
+
+Cargo decides among the candidates: one is a workspace when `cargo metadata` names it as
+its own workspace's root, so a member that keeps a stray `Cargo.lock` is not one. The
+member packages come from `cargo metadata --no-deps` too, so Cargo's rules for member
 globs, `exclude` and nested packages apply.
+
+A repository that has Cargo manifests and no workspace fails every command, with the rule
+above or with the `workspaceRoots` setting that left the roots out. No check passes for
+having had nothing to check.
 
 Both are collections, keyed by directory relative to the repository root. `"."` is the
 repository root.
@@ -649,7 +662,7 @@ assertion that does not hold.
 
 | Check | Covers |
 | --- | --- |
-| `single-package` | A package at the repository root: its keys, the check addresses, and every setting. |
+| `single-package` | A package at the repository root: its keys, the check addresses, and every setting. A package there with no `[workspace]` table and no `Cargo.lock`, and a repository whose manifests make no workspace. |
 | `workspace-members` | A workspace of several members: its keys, the `clippy` and `test` settings, and the toolchain and fetch layers. |
 | `two-workspaces` | Two workspaces in one repository: selection, the default volume prefixes, and separate inputs. |
 | `nested-workspaces` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. |

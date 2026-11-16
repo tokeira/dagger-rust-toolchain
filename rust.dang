@@ -326,7 +326,7 @@ type Rust {
   """
   workspaces(ws: Workspace!): RustWorkspaces! {
     RustWorkspaces(
-      paths: rustRootsHere(ws, rustDiscover(self, ws).roots),
+      paths: rustRootsHere(ws, rustRoots(self, ws)),
       tool: self,
       mountPath: rustMountPath(self, ws),
       prefix: volumePrefix ?? rustDefaultVolumePrefix(ws),

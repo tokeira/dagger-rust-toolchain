@@ -153,6 +153,66 @@ let devCoreSingle(run: DevRun!): [String!]! {
         + "never pull the image",
     ),
   ]
+  passed + devCoreLibrary(run)
+}
+
+# The library fixture: a package at the repository root with no [workspace]
+# table and no Cargo.lock, and repositories whose manifests make no
+# workspace.
+let devCoreLibrary(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let workspace = devConsumer(run, "library", "locked = false\n")
+  devListed(workspace, run, [], devLinks([{{root: ".", packages: ["."]}}]))
+  devStdout(workspace, run, ["check"])
+  passed += [
+    devHeld(
+      "library: a package at the repository root with no [workspace] table and no "
+        + "Cargo.lock is the workspace \".\" with the package \".\", and under locked = "
+        + "false its seven checks pass",
+    ),
+  ]
+
+  let rule = "rust: the repository has Cargo manifests, but no Cargo workspace."
+  let inner = devConfigured(
+    devRepository(run, "library", "library-inner")
+      .withExec(["mkdir", "crate"])
+      .withExec(["mv", "Cargo.toml", "src", "tests", "crate"]),
+    run,
+    "library-inner",
+    "",
+  )
+  let below = devFailing(inner, run, ["check"])
+  let belowCheck = "dagger check over a package below the root with no Cargo.lock"
+  devSays(belowCheck, below, rule)
+  devSays(belowCheck, below, "The manifests are in crate")
+  let listing = devFailing(inner, run, ["check", "-l", "--all"])
+  devSays("dagger check -l --all over the same repository", listing, rule)
+  passed += [
+    devHeld(
+      "library: with the package moved below the root, where nothing makes it a workspace, "
+        + "dagger check and dagger check -l --all fail with the rule and the manifest's "
+        + "directory, and no check passes for having nothing to check",
+    ),
+  ]
+
+  let narrowed = devConfigured(workspace, run, "library", "workspaceRoots = [\"**\", \"!.\"]\n")
+  let excluded = devFailing(narrowed, run, ["check"])
+  devSays(
+    "dagger check under a workspaceRoots that leaves out the only root",
+    excluded,
+    "rust: the workspaceRoots setting leaves no Cargo workspace to check. It is **, !., and "
+      + "the directories that may be workspace roots are .",
+  )
+  let bare = workspace.withoutFile("/library/Cargo.toml")
+  devListed(bare, run, [], [])
+  devStdout(bare, run, ["check"])
+  passed += [
+    devHeld(
+      "library: a workspaceRoots that leaves out the only root fails with the setting and "
+        + "the root; a repository with no Cargo manifest lists nothing, and dagger check "
+        + "passes there",
+    ),
+  ]
   passed
 }
 
