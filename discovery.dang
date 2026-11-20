@@ -35,6 +35,12 @@ let rustManifestPatterns: [String!]! = [
   "**/.cargo/config",
 ]
 
+# The target kinds, as `cargo metadata` names them, of a library that Cargo
+# runs doctests for: crate type lib, rlib or proc-macro. Cargo runs none for
+# a cdylib, staticlib or dylib alone, and an example has the kind "example",
+# whatever its crate type.
+let rustDoctestableKinds: [String!]! = ["lib", "rlib", "proc-macro"]
+
 # Last segment of the workspace root address, usually the repository name, as
 # dagger.io/go derives it.
 let rustWorkspaceName(ws: Workspace!): String! {
@@ -100,8 +106,9 @@ let rustSkeleton(root: Container!, manifests: Directory!, targets: [String!]!): 
 }
 
 # What `cargo metadata --no-deps` says of the workspace that holds a
-# directory: its root, and its member packages.
-let rustMetadata(tool: Rust!, skeleton: Directory!, at: String!): {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!}}!]!}}! {
+# directory: its root, and its member packages, each with the kinds of its
+# targets.
+let rustMetadata(tool: Rust!, skeleton: Directory!, at: String!): {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!, targets: [{{kind: [String!]!}}!]!}}!]!}}! {
   let ran = rustImage(tool)
     .withMountedDirectory("/skeleton", skeleton)
     .withWorkdir(rustPathIn("/skeleton", at))
@@ -109,7 +116,7 @@ let rustMetadata(tool: Rust!, skeleton: Directory!, at: String!): {{workspace_ro
   if (ran.exitCode != 0) {
     raise "rust: cargo metadata failed in " + at + ":\n" + ran.stderr
   }
-  JSON.decode(ran.stdout) :: {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!}}!]!}}!
+  JSON.decode(ran.stdout) :: {{workspace_root: String!, packages: [{{name: String!, manifest_path: String!, targets: [{{kind: [String!]!}}!]!}}!]!}}!
 }
 
 # The directories that hold a Cargo.toml, in byte order.
@@ -236,7 +243,8 @@ let rustRootsHere(ws: Workspace!, roots: [String!]!): [String!]! {
 }
 
 # The member packages of the workspace at a root: each one's directory
-# relative to the repository root, and its name, in byte order of directory.
+# relative to the repository root, its name, and whether it has a library
+# that Cargo runs doctests for, in byte order of directory.
 let rustMembers(tool: Rust!, found: RustDiscovery!, root: String!): [RustMember!]! {
   let metadata = rustMetadata(tool, found.skeleton, root)
   if (metadata.workspace_root != rustPathIn("/skeleton", root)) {
@@ -245,7 +253,13 @@ let rustMembers(tool: Rust!, found: RustDiscovery!, root: String!): [RustMember!
   }
   let members = metadata.packages.map { pkg =>
     let dir = pkg.manifest_path.trimPrefix("/skeleton/").trimSuffix("Cargo.toml").trimSuffix("/")
-    RustMember(path: if (dir == "") { "." } else { dir }, name: pkg.name)
+    RustMember(
+      path: if (dir == "") { "." } else { dir },
+      name: pkg.name,
+      doctestable: pkg.targets.any { target =>
+        target.kind.any { kind => rustDoctestableKinds.contains(kind) }
+      },
+    )
   }
   rustSorted(members.map { member => member.path }).map { path =>
     members.filter { member => member.path == path }[0]!

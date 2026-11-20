@@ -342,6 +342,34 @@ let devWholeSettings(run: DevRun!): [String!]! {
     ),
   ]
 
+  # crates/tool of test-suite has a binary and no library: a run of its tests
+  # alone has no doctest to run.
+  let binary = devConsumer(run, devTestSuite, devWholeSetting + "test = [\"crates/tool\"]\n")
+    .withNewFile("/" + devTestSuite + "/crates/tool/acceptance-run.txt", run.next)
+  let binarySteps = devSteps(binary, run, checks)
+  let binaryCheck = "the tests of test-suite under wholeWorkspace and test = [\"crates/tool\"]"
+  devStateOf(binaryCheck, binarySteps, devWholeRun, "DONE")
+  if (binarySteps.any { step => step.command.hasPrefix(devWholeDoctests) }) {
+    raise devCheckFailed(
+      binaryCheck,
+      "ran `" + devWholeDoctests + "`:\n" + devDescribed(binarySteps),
+    )
+  }
+  let binaryAgain = devSteps(binary, run, checks)
+  if (binaryAgain.any { step => step.state != "CACHED" }) {
+    raise devCheckFailed(
+      "a second run of " + binaryCheck,
+      "ran a command again:\n" + devDescribed(binaryAgain),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-suite: under wholeWorkspace and test = [\"crates/tool\"], a selection with no "
+        + "library, the run passes without a cargo test --doc step, and a second run runs no "
+        + "command",
+    ),
+  ]
+
   let plain = devConfigured(
     devConsumer(run, devWholeFixture, "").withNewFile(
       "/" + devWholeFixture + "/notes/acceptance-run.txt",

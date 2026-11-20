@@ -12,6 +12,9 @@
 #   doctests  `cargo test --doc` in the same container and volumes, as a
 #             step that syncs for itself. `cargo test` runs the doctests
 #             itself, so under testRunner = "cargo" there is no such step.
+#             Nor is there one when no selected package has a library
+#             that Cargo runs doctests for: crate type lib, rlib or
+#             proc-macro.
 #
 # Everything that touches the volumes is in those steps, so nothing is
 # copied out of them, and no step is keyed on a package's files alone: the
@@ -83,21 +86,20 @@ let rustTestWorkspaceDoctests(selection: RustPackages!): Container! {
 }
 
 # What to tell the user of a whole workspace's tests, or "" when they pass:
-# the end of the report of each command that failed. A doctest command that
-# found no library to test has no doctest to run, and passes.
+# the end of the report of each command that failed. A selection in which no
+# package has a library that Cargo runs doctests for has no doctest, and
+# runs no doctest command.
 let rustTestWorkspaceFailure(selection: RustPackages!): String! {
   let none: [String!]! = []
   let ran = rustTestWorkspaceRun(selection)
   let run = if (ran.exitCode == 0) { none } else { [rustTestTail(ran.stdout + ran.stderr)] }
-  if (selection.workspace.tool.testRunner == "cargo") {
+  let tool = selection.workspace.tool
+  if (tool.testRunner == "cargo" or selection.doctestable(tool.test).length == 0) {
     run.join("\n")
   } else {
     let doctests = rustTestWorkspaceDoctests(selection)
     let errors = doctests.stderr
-    let bare = errors.split("\n").any { line =>
-      line.hasPrefix("error: no library targets found in package")
-    }
-    if (doctests.exitCode == 0 or bare) { run.join("\n") } else {
+    if (doctests.exitCode == 0) { run.join("\n") } else {
       (run + [rustTestTail(doctests.stdout + errors)]).join("\n")
     }
   }

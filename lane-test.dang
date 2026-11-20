@@ -16,7 +16,9 @@
 #             build's container and volumes, of which each package reads its
 #             share. rustdoc compiles doctests against the libraries in the
 #             target directory, so this step runs again whenever the build
-#             does.
+#             does. There is none when no selected package has a library
+#             that Cargo runs doctests for: crate type lib, rlib or
+#             proc-macro.
 
 # How many lines of a failed command's output a check reports, from the end.
 let rustTestReportLines: Int! = 200
@@ -382,12 +384,15 @@ let rustTestDoctestOwner(hint: String!, covered: [RustMember!]!): String! {
 # after each package's doctests, Cargo prints a hint if they failed, and each
 # package's check looks for its own.
 #
+# rustTestFailure calls it only when a selected package has a library that
+# Cargo runs doctests for: crate type lib, rlib or proc-macro, which
+# RustMember.doctestable records. With none, Cargo would fail the step with
+# "no library targets found".
+#
 # A failed step passes a package only when every hint is about another
 # covered package. When a hint is about none of them, or the step failed
 # with no hint at all, nothing says whose doctests failed or whether they
-# ran, and every covered package fails. The exception is Cargo's "no library
-# targets found": no package it was given has a library, so there is no
-# doctest to run, and every package passes.
+# ran, and every covered package fails.
 #
 # The package's share of the output is what Cargo and rustdoc printed
 # between "Doc-tests <crate>" and the package's hint. Cargo writes those two
@@ -416,9 +421,7 @@ let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
     let hints = lines.filter { line => line.hasPrefix(rustTestDoctestHint) }
     let own = hints.filter { hint => rustTestDoctestOwner(hint, covered) == package.name }
     if (hints.length == 0) {
-      if (lines.any { line => line.hasPrefix("error: no library targets found in package") }) { "" } else {
-        "the doctests did not run:\n" + rustTestTail(errors)
-      }
+      "the doctests did not run:\n" + rustTestTail(errors)
     } else if (hints.any { hint => rustTestDoctestOwner(hint, covered) == "" }) {
       "a doctest failed, and Cargo's output does not say in which of the packages "
         + covered.map { member => member.name }.join(", ") + ":\n"
@@ -439,7 +442,9 @@ let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
   }
 }
 
-# What to tell the user of a package's tests, or "" when they pass.
+# What to tell the user of a package's tests, or "" when they pass. A
+# selection in which no package has a library that Cargo runs doctests for
+# has no doctest, and runs no doctest step.
 let rustTestFailure(package: RustPackage!, selection: RustPackages!): String! {
   let compiled = rustTestCompiled(selection)
   if (compiled.exitCode != 0) {
@@ -456,7 +461,9 @@ let rustTestFailure(package: RustPackage!, selection: RustPackages!): String! {
     } else {
       rustTestNextestRun(package, selection, outputs)
     }
-    let doctests = rustTestDoctests(package, selection)
+    let doctests = if (selection.doctestable(package.workspace.tool.test).length == 0) { "" } else {
+      rustTestDoctests(package, selection)
+    }
     [run, doctests].filter { failure => failure != "" }.join("\n")
   }
 }

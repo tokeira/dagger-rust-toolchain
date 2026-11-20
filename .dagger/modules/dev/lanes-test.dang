@@ -665,6 +665,32 @@ let devTestOverSuite(run: DevRun!): [String!]! {
   }
   passed += [devHeld("test-suite: --rust-package=crates/base builds and runs that package alone")]
 
+  # crates/tool has a binary and no library: alone, it has no doctest to run.
+  let binary = ["check", "--check=test", "--rust-package=crates/tool"]
+  let binarySteps = devSteps(redated, run, binary)
+  let binaryCheck = "the tests of --rust-package=crates/tool, which has no library"
+  if (devTestRuns(binarySteps, devTestTool).length == 0
+    or binarySteps.any { step => step.command.hasPrefix(devTestDoctests) }) {
+    raise devCheckFailed(
+      binaryCheck,
+      "did not run the tests of crates/tool, or ran `" + devTestDoctests + "`:\n"
+        + devDescribed(binarySteps),
+    )
+  }
+  let binaryAgain = devSteps(redated, run, binary)
+  if (binaryAgain.any { step => step.state != "CACHED" }) {
+    raise devCheckFailed(
+      "a second run of " + binaryCheck,
+      "ran a command again:\n" + devDescribed(binaryAgain),
+    )
+  }
+  passed += [
+    devHeld(
+      "test-suite: --rust-package=crates/tool, a selection with no library, passes without a "
+        + "cargo test --doc step, and a second run of it runs no command",
+    ),
+  ]
+
   let loose = devConfigured(redated, run, devTestSuite, "locked = false\n")
   let looseBuild = devTestCommand(
     "the tests under locked = false",

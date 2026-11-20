@@ -19,6 +19,10 @@ type RustMember {
   Package name, as Cargo's -p flag takes it.
   """
   name: String!
+
+  # Whether the package has a library that Cargo runs doctests for: a target
+  # of crate type lib, rlib or proc-macro, the kinds of rustDoctestableKinds.
+  let doctestable: Boolean!
 }
 
 """
@@ -70,6 +74,12 @@ type RustPackages @collection {
     members.filter { member =>
       (whole or paths.contains(member.path)) and rustSelects(patterns, member.path)
     }
+  }
+
+  # The members of `selected(patterns)` that have a library that Cargo runs
+  # doctests for.
+  let doctestable(patterns: [String!]!): [RustMember!]! {
+    selected(patterns).filter { member => member.doctestable }
   }
 
   # How a shared Cargo command names the packages it covers: --workspace when

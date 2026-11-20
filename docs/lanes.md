@@ -115,9 +115,10 @@ A `RustPackages` is the selection a package check receives.
 | Member | Gives |
 | --- | --- |
 | `paths` | The selected keys. The engine narrows this list. |
-| `members` | Every member of the workspace as `RustMember(path, name)`, selected or not. |
+| `members` | Every member of the workspace as `RustMember(path, name)`, selected or not. A member's `doctestable` says whether it has a library that Cargo runs doctests for: crate type `lib`, `rlib` or `proc-macro`, the target kinds of `rustDoctestableKinds` as `cargo metadata` gives them. |
 | `narrowed` | Whether the selection left members out. |
 | `selected(patterns)` | The selected members that `patterns` select too, in key order. Pass `workspace.tool.clippy` or `workspace.tool.test`. Under `wholeWorkspace`, every member that `patterns` select. |
+| `doctestable(patterns)` | The members of `selected(patterns)` that have a library that Cargo runs doctests for. With none, the test lane runs no doctest step. |
 | `packageFlags(patterns)` | `["--workspace"]` when nothing is left out, otherwise `-p <name>` for each member of `selected(patterns)`. It raises when nothing is selected: Cargo, given no package, would run on every member. |
 | `whole` | Whether the collection is one item that stands for every member: the `wholeWorkspace` setting. |
 | `repository` | `RustWorkspace.repositoryOf(ws)` under `wholeWorkspace`, and otherwise an empty directory. |
@@ -807,7 +808,7 @@ Measured on `v1.0.0-beta.27`:
 | The test build | `rustTestCompiled(selection)` | By every package's check | The dependency layer, `inputs.source`, the settings, and `selection.packageFlags(tool.test)`. |
 | The workspace's metadata, for nextest | `rustTestMetadata(selection)` | By every package's check | `inputs.source` and the toolchain layer. It mounts no volume. |
 | A package's run | `rustTestNextestRun`, or `rustTestCargoRun` under `testRunner = "cargo"` | No: one per package | The content of the package's test binaries and of the binaries its tests run, the skeleton, the package's own files, and the toolchain and fetch layers. |
-| The doctests | `rustTestDoctests` | By every package's check | The test build: it runs in the build's container. |
+| The doctests | `rustTestDoctests`, when a selected package has a library that Cargo runs doctests for | By every package's check | The test build: it runs in the build's container. |
 
 The test build and the doctests run in the lane's volumes, `<volumePrefix>-target-test`
 and `<volumePrefix>-source-test`, under the helper. After a source edit the build
@@ -862,6 +863,10 @@ package's position, and ends with `RustLaneResults.assertPassed` like clippy.
   `could not compile` with Cargo's output, the others with `not tested: the test build
   failed.` before it. cargo-nextest and `cargo test` have no `--keep-going`, so the
   packages that a failure does not block are not built either.
+- The lane runs no doctest step for a selection in which no package has a library that
+  Cargo runs doctests for: crate type `lib`, `rlib` or `proc-macro`. There is no doctest
+  there, and Cargo would fail the step with `no library targets found`.
+  `rustTestFailure` reads `selection.doctestable(tool.test)`.
 - After each package's doctests, the shared doctest step prints a hint if they failed:
   ``error: doctest failed, to rerun pass `<arguments>` ``. `rustTestDoctestOwner` reads
   whose doctests a hint is about:
@@ -873,9 +878,7 @@ package's position, and ends with `RustLaneResults.assertPassed` like clippy.
     write it, even for a command that ran with `-p <name>@<version>`.
 - The doctest step fails closed. A package passes a failed step only when every hint is
   about another covered package. When a hint is about no covered package, or the step
-  failed with no hint, every covered package fails with the step's output. The exception
-  is Cargo's `no library targets found`: no package it was given has a library, there is
-  no doctest, and every package passes.
+  failed with no hint, every covered package fails with the step's output.
 - A package's share of the step's output is what Cargo and rustdoc printed between
   `Doc-tests <crate>` and the package's hint. Cargo writes those two lines to stderr,
   and rustdoc writes the doctests' report to stdout, so the engine can record the
@@ -928,9 +931,10 @@ directory the mirror is made equal to, is `selection.repository`.
   message keeps, has what each failed test printed, and `--no-tests pass`. Arguments
   outrank the workspace's `.config/nextest.toml`, which is otherwise in force.
 - **`cargo test` runs the doctests itself**, so under `testRunner = "cargo"` there is one
-  step.
+  step. There is one step too when no selected package has a library that Cargo runs
+  doctests for: with `selection.doctestable(tool.test)` empty there is no doctest to run.
 - **The message** is `rust: test failed in <root>:` and the end of each failed command's
-  output. A doctest command that finds no library target passes, as for a package.
+  output.
 
 **`.git` is not in the repository view**, by choice. What was found on `v1.0.0-beta.27`:
 
@@ -1039,9 +1043,9 @@ assertion that does not hold.
 | `nested-workspaces` | `devCoreNested`, in `core.dang` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. | `nested` |
 | `lint-lanes` | `devLint`, in `lanes-lint.dang` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes: what each of the two cargo-deny checks rejects, and that a moved advisory database runs `advisories` again and leaves `deny` cached. | `single`, and those whose names start `lint-` |
 | `build-lanes` | `devBuild`, in `lanes-build.dang` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. The settings `checkAllFeatures` and `checkNoDefaultFeatures`, and what the check lane runs with both off. `buildJobs` and `cargoEnvironment`, in the dependency layer and in the three lanes. | `members`, `single`, `pair`, `nested`, and those whose names start `build-` |
-| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. That a test which reads a file of a member below its package fails by default, and passes when `includeExtraFiles` names the file. | `single`, `members`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
+| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. That a test which reads a file of a member below its package fails by default, and passes when `includeExtraFiles` names the file. That a selection with no library passes without a doctest step, and that a second run of it runs no command. | `single`, `members`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
 | `cache-volumes` | `devCache`, in `lanes-cache.dang` | The helper's own tests, and the compile lanes' volumes: their names, what a lane compiles over empty volumes, after a one-file edit and after a change to the dependency layer, that a deleted file is gone, and that verdicts over warm volumes and over empty ones agree. | `test-suite`, `pair`, `build-lints`, `build-stale` |
-| `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; the one clippy check and the one fmt generator. | `test-whole`, `build-lints`, `lint-fmt` |
+| `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; that a selection with no library runs no doctest step; the one clippy check and the one fmt generator. | `test-whole`, `test-suite`, `build-lints`, `lint-fmt` |
 | `shared-layers` | `devCoreShared`, in `core.dang` | That the seven lanes of a workspace share one recipe and one fetch. | `lint-deny` |
 
 `dev.dang` holds the checks themselves, on `Dev`, and the generator `dang-format`.

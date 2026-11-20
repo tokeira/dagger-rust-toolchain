@@ -631,7 +631,9 @@ it. That holds for a member below the package's own directory too: a pattern suc
 
 rustdoc compiles doctests when they run, against the libraries in the test build's
 target directory. They therefore run in one step for all the selected packages, which
-runs again whenever the test build does. Each package's check reads its own share.
+runs again whenever the test build does. Each package's check reads its own share. There
+is no such step when no selected package has a library that Cargo runs doctests for:
+crate type `lib`, `rlib` or `proc-macro`.
 
 With `testRunner = "cargo"` the test build is `cargo test --no-run`, and a package's run
 executes each of its test binaries in the package's directory, as `cargo test` does.
@@ -659,7 +661,9 @@ and two steps do its work after the dependency layer:
 
 `<packages>` is `--workspace`, or `-p <name>` for each package the `test` setting
 selects when it leaves some out. With `testRunner = "cargo"` the run is `cargo test
---no-fail-fast`, which runs the doctests too, and there is no second step.
+--no-fail-fast`, which runs the doctests too, and there is no second step. Nor is there
+one when no selected package has a library that Cargo runs doctests for: crate type
+`lib`, `rlib` or `proc-macro`.
 
 - **The run has the whole repository, and can write to it.** Both steps run in the test
   lane's [cache volumes](#cache-volumes), and the mirror is of the repository: every file
