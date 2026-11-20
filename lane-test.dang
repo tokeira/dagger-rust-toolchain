@@ -29,13 +29,15 @@
 # How many lines of a failed command's output a check reports, from the end.
 let rustTestReportLines: Int! = 200
 
-# The end of a command's output, for a check's message.
+# The end of a command's output, for a check's message. A backtick string
+# takes `\n` as a backslash and an n, so the line that says how many lines
+# were left out ends with a quoted "\n".
 let rustTestTail(output: String!): String! {
   let lines = output.trimRight("\n").split("\n")
   if (lines.length <= rustTestReportLines) {
     lines.join("\n")
   } else {
-    `(${lines.length - rustTestReportLines} earlier lines left out)\n`
+    `(${lines.length - rustTestReportLines} earlier lines left out)` + "\n"
       + lines.takeLast(rustTestReportLines).join("\n")
   }
 }

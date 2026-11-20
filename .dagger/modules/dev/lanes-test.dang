@@ -377,6 +377,15 @@ let devTestOverMoment(run: DevRun!): [String!]! {
   devSays(check, output, "rust: test failed in .:")
   devTestReported(check, output, "FAIL", "test-moment::moment fails_at_a_new_moment")
   devSays(check, output, "Summary [")
+  # The test prints more lines than the message keeps: it starts by saying
+  # how many it left out, on a line of its own.
+  if (devLines(output).any { line => devTrimEnd(line).hasSuffix(" earlier lines left out)") } == false
+    or output.contains("left out)\\n")) {
+    raise devCheckFailed(
+      check,
+      "did not end \"earlier lines left out)\" with a line ending:\n" + devTail(output),
+    )
+  }
   devSays(check, output, "Doc-tests test_moment")
   devSays(check, output, "src/lib.rs - moment (line 9) ... FAILED")
   devSays(check, output, "error: doctest failed, to rerun pass `--doc`")
@@ -386,6 +395,11 @@ let devTestOverMoment(run: DevRun!): [String!]! {
         + "same files each report a moment of their own, from the test and from the doctest; "
         + "the message has \"rust: test failed in .:\", cargo-nextest's summary and its line "
         + "for the failed test, and the doctest's failure with Cargo's hint",
+    ),
+
+    devHeld(
+      "test-moment: a report longer than the message keeps starts with the number of lines "
+        + "left out, on a line of its own",
     ),
   ]
 
