@@ -20,6 +20,9 @@
 # copied out of them, and no step is keyed on a package's files alone: the
 # run is keyed on the repository, and runs again after any edit to it.
 #
+# The engine keeps a step that passed, and not one that failed: the next run
+# of the check runs it again, as rustTestRan says.
+#
 # The Cargo commands take the target directory as arguments. The lane's
 # container has it in its environment, where a Cargo that a test starts
 # would find it too, and build into the lane's volume in place of its own
@@ -35,54 +38,63 @@ let rustTestWorkspaceTarget: [String!]! = [
 # How a command starts whose environment must not name the target directory.
 let rustTestWorkspaceClear: [String!]! = ["env", "-u", "CARGO_TARGET_DIR", "-u", "CARGO_BUILD_BUILD_DIR"]
 
-# The run: one command builds and runs the tests of the packages that the
-# test setting selects, under the helper, which syncs the mirror of the
-# repository first.
+# The container the lane's commands run in: the test build's, with
+# cargo-nextest unless the runner is cargo.
+let rustTestWorkspaceLane(selection: RustPackages!): Container! {
+  let workspace = selection.workspace
+  let build = rustTestBuilder(workspace, selection.inputs, selection.repository)
+  if (workspace.tool.testRunner == "cargo") { build } else {
+    rustTestWithNextest(workspace.tool, build)
+  }
+}
+
+# The command of the run: it builds and runs the tests of the packages that
+# the test setting selects.
 #
 # Both runners run every test, whatever fails. cargo-nextest shows what each
 # failed test printed once more at the end of its report, which is the part
 # a check's message keeps, and passes a workspace that has no test.
-let rustTestWorkspaceRun(selection: RustPackages!): Container! {
-  let workspace = selection.workspace
-  let tool = workspace.tool
-  let build = rustTestBuilder(workspace, selection.inputs, selection.repository)
+let rustTestWorkspaceCommand(selection: RustPackages!): [String!]! {
+  let tool = selection.workspace.tool
   if (tool.testRunner == "cargo") {
-    rustCompileCargo(
-      workspace,
-      build,
-      rustTestWorkspaceClear + ["cargo", "test", "--no-fail-fast"]
-        + rustCargoFlags(tool, selection.inputs)
-        + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
-      "",
-      [],
-    )
+    rustTestWorkspaceClear + ["cargo", "test", "--no-fail-fast"]
+      + rustCargoFlags(tool, selection.inputs)
+      + selection.packageFlags(tool.test) + rustTestWorkspaceTarget
   } else {
-    rustCompileCargo(
-      workspace,
-      rustTestWithNextest(tool, build),
-      rustTestWorkspaceClear
-        + ["cargo", "nextest", "run", "--no-fail-fast", "--failure-output", "immediate-final"]
-        + ["--no-tests", "pass"] + rustTestNextestFlags(tool, selection.inputs) + selection.packageFlags(tool.test)
-        + rustTestWorkspaceTarget,
-      "",
-      [],
-    )
+    rustTestWorkspaceClear
+      + ["cargo", "nextest", "run", "--no-fail-fast", "--failure-output", "immediate-final"]
+      + ["--no-tests", "pass"] + rustTestNextestFlags(tool, selection.inputs) + selection.packageFlags(tool.test)
+      + rustTestWorkspaceTarget
   }
 }
 
-# The doctests of the same packages, after a cargo-nextest run: in the run's
-# container, as a step that syncs the mirror for itself.
-let rustTestWorkspaceDoctests(selection: RustPackages!): Container! {
-  let tool = selection.workspace.tool
-  rustCompileCargo(
+# The run: one command under the helper, which syncs the mirror of the
+# repository first. It is a step that must succeed, so the engine keeps it
+# when the build and every test pass, and not otherwise: rustTestRan. The
+# build is part of the step, so a build that fails is not kept either, and
+# compiles again next time over what the volume holds.
+let rustTestWorkspaceRun(selection: RustPackages!): Container! {
+  rustCompileTests(
     selection.workspace,
-    rustTestWorkspaceRun(selection),
-    rustTestWorkspaceClear + ["cargo", "test", "--doc", "--no-fail-fast"]
-      + rustCargoFlags(tool, selection.inputs)
-      + selection.packageFlags(tool.test) + rustTestWorkspaceTarget,
-    "",
-    [],
+    rustTestWorkspaceLane(selection),
+    rustTestWorkspaceCommand(selection),
   )
+}
+
+# The command of the doctests of the same packages.
+let rustTestWorkspaceDoctestCommand(selection: RustPackages!): [String!]! {
+  let tool = selection.workspace.tool
+  rustTestWorkspaceClear + ["cargo", "test", "--doc", "--no-fail-fast"]
+    + rustCargoFlags(tool, selection.inputs)
+    + selection.packageFlags(tool.test) + rustTestWorkspaceTarget
+}
+
+# The doctests, after a cargo-nextest run: in the container `after`, as a
+# step that syncs the mirror for itself and must succeed. `after` is the
+# run's container when the run passed, and the lane's when it failed: a
+# failed step leaves no container to run in.
+let rustTestWorkspaceDoctests(selection: RustPackages!, after: Container!): Container! {
+  rustCompileTests(selection.workspace, after, rustTestWorkspaceDoctestCommand(selection))
 }
 
 # What to tell the user of a whole workspace's tests, or "" when they pass:
@@ -91,16 +103,21 @@ let rustTestWorkspaceDoctests(selection: RustPackages!): Container! {
 # runs no doctest command.
 let rustTestWorkspaceFailure(selection: RustPackages!): String! {
   let none: [String!]! = []
-  let ran = rustTestWorkspaceRun(selection)
-  let run = if (ran.exitCode == 0) { none } else { [rustTestTail(ran.stdout + ran.stderr)] }
+  let ran = rustTestHelped(rustTestWorkspaceRun(selection), rustTestWorkspaceCommand(selection))
+  let run = if (ran.exitCode == 0) { none } else { [ran.report] }
   let tool = selection.workspace.tool
   if (tool.testRunner == "cargo" or selection.doctestable(tool.test).length == 0) {
     run.join("\n")
   } else {
-    let doctests = rustTestWorkspaceDoctests(selection)
-    let errors = doctests.stderr
+    let after = if (ran.exitCode == 0) { rustTestWorkspaceRun(selection) } else {
+      rustTestWorkspaceLane(selection)
+    }
+    let doctests = rustTestHelped(
+      rustTestWorkspaceDoctests(selection, after),
+      rustTestWorkspaceDoctestCommand(selection),
+    )
     if (doctests.exitCode == 0) { run.join("\n") } else {
-      (run + [rustTestTail(doctests.stdout + errors)]).join("\n")
+      (run + [doctests.report]).join("\n")
     }
   }
 }

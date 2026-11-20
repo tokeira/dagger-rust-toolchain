@@ -10,8 +10,9 @@
 #   run       one step per package: the package's test binaries, taken from
 #             the build's kept files one at a time, over the package's own
 #             files. A file read from a step that has run is keyed on its
-#             content, so a run is cached for as long as its binaries and
-#             files are the same, whatever else the build compiled again.
+#             content, so a run that passed is cached for as long as its
+#             binaries and files are the same, whatever else the build
+#             compiled again.
 #   doctests  one `cargo test --doc` over the selected packages, in the
 #             build's container and volumes, of which each package reads its
 #             share. rustdoc compiles doctests against the libraries in the
@@ -19,6 +20,11 @@
 #             does. There is none when no selected package has a library
 #             that Cargo runs doctests for: crate type lib, rlib or
 #             proc-macro.
+#
+# The engine keeps a run or a doctest step that passed, and not one in which
+# a test failed: the same source can fail a test one time and pass it the
+# next, so the next run of the check runs the tests again. rustTestRan has
+# the reasons. The build's failure is the source's, and is kept.
 
 # How many lines of a failed command's output a check reports, from the end.
 let rustTestReportLines: Int! = 200
@@ -32,6 +38,68 @@ let rustTestTail(output: String!): String! {
     `(${lines.length - rustTestReportLines} earlier lines left out)\n`
       + lines.takeLast(rustTestReportLines).join("\n")
   }
+}
+
+# How a step that ran tests ended: the command's exit code, and for a step
+# that failed what it wrote, each stream from its end.
+type RustTestRan {
+  let exitCode: Int!
+  let stdout: String!
+  let stderr: String!
+
+  # The end of what a failed step wrote, for a check's message: its stdout,
+  # then its stderr.
+  let report: String! {
+    rustTestTail(stdout + stderr)
+  }
+}
+
+# Evaluates a step that must succeed, and says that it did.
+let rustTestPassed(step: Container!): RustTestRan! {
+  step.sync
+  RustTestRan(exitCode: 0, stdout: "", stderr: "")
+}
+
+# What the engine says of a step whose command failed: the command's exit
+# code and the end of each stream it wrote, up to 100 KiB, which the error
+# carries in its extensions. An error without an exit code is not the
+# command's: the engine could not run the step, or was stopped. It is raised
+# again as the engine words it.
+let rustTestFailed(failed: GraphQLError!): RustTestRan! {
+  let step = JSON.decode(failed.extensions) :: {{exitCode: Int, stdout: String, stderr: String}}!
+  let code = step.exitCode
+  if (code == null) {
+    raise failed.message
+  }
+  RustTestRan(exitCode: code ?? 0, stdout: step.stdout ?? "", stderr: step.stderr ?? "")
+}
+
+# Runs a step that runs tests, and returns how it ended.
+#
+# The step must succeed, so the engine keeps it only when the tests pass. A
+# run that passed is answered from the cache for as long as its inputs are
+# the same. A run in which a test failed is an error to the engine, which
+# keeps no error: the next run of the check runs the tests again, and a test
+# that fails one time in several is not reported from the cache as if it had
+# failed again. The lane reads the failed run's output from the error.
+#
+# Nothing here runs the command a second time. A test that fails fails its
+# check, however it would do on another try.
+let rustTestRan(step: Container!): RustTestRan! {
+  rustTestPassed(step) rescue {
+    failed: GraphQLError => rustTestFailed(failed)
+  }
+}
+
+# How a step that runs tests under the helper ended: rustTestRan, for a step
+# of rustCompileTests. A failure of the helper's own, such as a full disk,
+# says nothing of the tests, and is raised with what the helper wrote.
+let rustTestHelped(step: Container!, command: [String!]!): RustTestRan! {
+  let ran = rustTestRan(step)
+  if (ran.exitCode == rustCompileFailed) {
+    raise "rust: `" + command.join(" ") + "` did not run to its end:\n" + rustTestTail(ran.stderr)
+  }
+  ran
 }
 
 # The flags of the settings as cargo-nextest takes them: --profile is its own
@@ -271,23 +339,22 @@ let rustTestNextestRun(
   let files = ["binaries-metadata.json"]
     + rustTestNextestFiles(outputs, rustPathIn(workspace.mountPath, package.path))
   let kept = rustTestKept(outputs, files).withNewFile("cargo-metadata.json", rustTestMetadata(selection))
-  let ran = rustTestWithNextest(workspace.tool, rustTestRunner(
-    package,
-    selection,
-    kept,
-  ))
-    .withExec(
-      [
+  let ran = rustTestRan(
+    rustTestWithNextest(workspace.tool, rustTestRunner(
+      package,
+      selection,
+      kept,
+    ))
+      .withExec([
         "cargo", "nextest", "run",
         "--binaries-metadata", rustTestTargetDir + "/binaries-metadata.json",
         "--cargo-metadata", rustTestTargetDir + "/cargo-metadata.json",
         "-E", "package(=" + package.name + ")",
         "--no-tests", "pass",
         "--no-fail-fast",
-      ],
-      expect: ANY,
-    )
-  if (ran.exitCode == 0) { "" } else { rustTestTail(ran.stdout + ran.stderr) }
+      ]),
+  )
+  if (ran.exitCode == 0) { "" } else { ran.report }
 }
 
 # The files of the target directory that a package's run under cargo needs,
@@ -351,8 +418,8 @@ let rustTestCargoRun(
     .withEnvVariable("CARGO_PKG_NAME", package.name)
     .withEnvVariable("LD_LIBRARY_PATH", libraries)
   files.tests.reduce("") { failures, test =>
-    let ran = ready.withExec([test], expect: ANY)
-    if (ran.exitCode == 0) { failures } else { failures + rustTestTail(ran.stdout + ran.stderr) + "\n" }
+    let ran = rustTestRan(ready.withExec([test]))
+    if (ran.exitCode == 0) { failures } else { failures + ran.report + "\n" }
   }
 }
 
@@ -380,6 +447,32 @@ let rustTestDoctestOwner(hint: String!, covered: [RustMember!]!): String! {
   }
 }
 
+# A package's share of a failed doctest step's output, or "" when the output
+# does not show which part is the package's.
+#
+# Cargo writes "Doc-tests <crate>" to stderr before each package's doctests,
+# and the package's hint after them if they failed. rustdoc writes each
+# package's report to stdout, and ends it with a "test result:" line. The
+# engine gives the two streams apart, so the share is put together again:
+# the heading before the package's hint, the report at the heading's place
+# among the reports, and the hint. When there is not one report for each
+# heading, as when rustdoc could not build a package's doctests or the
+# engine gave only the end of a long stream, the places say nothing.
+let rustTestDoctestShare(stdout: String!, errors: String!, hint: String!): String! {
+  let heading = "   Doc-tests "
+  let headings = errors.split("\n").filter { line => line.hasPrefix(heading) }
+  let before = errors.split(hint)[0]!.split("\n").filter { line => line.hasPrefix(heading) }
+  let reports = stdout.split("\ntest result: ")
+  if (before.length == 0 or reports.length != headings.length + 1) { "" } else {
+    let place = before.length - 1
+    let tests = if (place == 0) { reports[0]! } else {
+      reports[place]!.split("\n").dropFirst(1).join("\n")
+    }
+    before[place]!.trimSpace + "\n\n" + tests.trim("\n") + "\ntest result: "
+      + reports[place + 1]!.split("\n")[0]! + "\n\n" + hint
+  }
+}
+
 # What a package's doctests report when one fails, or "". The step is shared:
 # after each package's doctests, Cargo prints a hint if they failed, and each
 # package's check looks for its own.
@@ -394,12 +487,13 @@ let rustTestDoctestOwner(hint: String!, covered: [RustMember!]!): String! {
 # with no hint at all, nothing says whose doctests failed or whether they
 # ran, and every covered package fails.
 #
-# The package's share of the output is what Cargo and rustdoc printed
-# between "Doc-tests <crate>" and the package's hint. Cargo writes those two
-# lines to stderr and rustdoc writes the doctests' report to stdout, so the
-# engine can record the report after the hint, as it did on a busy engine. A
-# share without the report's "test result:" line is not the whole of it: the
-# package then gets the step's whole output.
+# The package's share of the output is Cargo's "Doc-tests <crate>", rustdoc's
+# report of the package's doctests, and the package's hint:
+# rustTestDoctestShare. When the output does not show the share, the package
+# gets the step's whole output.
+#
+# The step must succeed, as rustTestRan says: the engine keeps it when every
+# doctest passes, and not when one fails.
 #
 # The step runs under the helper, in the build's container and volumes. It
 # syncs the mirror and lets Cargo see to the libraries itself, so it is
@@ -407,13 +501,14 @@ let rustTestDoctestOwner(hint: String!, covered: [RustMember!]!): String! {
 let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
   let tool = package.workspace.tool
   let covered = selection.selected(tool.test)
-  let ran = rustCompileCargo(
-    package.workspace,
-    rustTestCompiled(selection),
-    ["cargo", "test", "--doc", "--no-fail-fast"] + rustCargoFlags(tool, selection.inputs)
-      + selection.packageFlags(tool.test),
-    "",
-    [],
+  let command = ["cargo", "test", "--doc", "--no-fail-fast"] + rustCargoFlags(
+    tool,
+    selection.inputs,
+  )
+    + selection.packageFlags(tool.test)
+  let ran = rustTestHelped(
+    rustCompileTests(package.workspace, rustTestCompiled(selection), command),
+    command,
   )
   if (ran.exitCode == 0) { "" } else {
     let errors = ran.stderr
@@ -429,15 +524,8 @@ let rustTestDoctests(package: RustPackage!, selection: RustPackages!): String! {
     } else if (own.length == 0) {
       ""
     } else {
-      let before = ran.combinedOutput.split(own[0]!)
-      let share = if (before.length < 2) { "" } else {
-        before[0]!.split("   Doc-tests ").takeLast(1).join("")
-      }
-      if (share.contains("test result: ")) {
-        rustTestTail("Doc-tests " + share + own[0]!)
-      } else {
-        rustTestTail(ran.stdout + errors)
-      }
+      let share = rustTestDoctestShare(ran.stdout, errors, own[0]!)
+      if (share == "") { rustTestTail(ran.stdout + errors) } else { rustTestTail(share) }
     }
   }
 }

@@ -333,6 +333,16 @@ or a download that failed.
   exit code and the end of each output. The fetch layer runs so, because it reaches the
   network, and so do the check flavour's `cargo check` steps, whose `rescue` reads the
   extensions and raises with the command and the end of Cargo's stderr.
+- A step that runs tests runs without `expect` too: a test can fail one time and pass
+  the next over the same source, so its failure is not the source's alone.
+  `rustTestRan(step)` evaluates the step and returns how it ended, as a `RustTestRan`:
+  exit code 0, or the exit code, `stdout` and `stderr` that the error's `extensions`
+  carry, each stream from its end, up to 100 KiB. The engine keeps the step when it
+  passes and not when it fails, so the next run of the check runs the tests again. An
+  error without an exit code is not the command's, and is raised as the engine words
+  it. `rustTestRan` never runs a command twice: a test that fails must fail its check.
+  `rustCompileTests(workspace, lane, command)` makes such a step under the helper, and
+  `rustTestHelped` raises when the helper itself failed, with exit code 125.
 
 ### Keep to the module's conventions
 
@@ -831,6 +841,19 @@ runs again. The build compiles with `CARGO_INCREMENTAL=0`, at the dependency lay
 paths and under its environment, so a package whose inputs did not change has the same
 binaries whether Cargo found them in a warm volume or compiled them in a new one.
 
+**A failed run is not kept.** The steps that run tests are steps that must succeed:
+a package's run, each test binary under `testRunner = "cargo"`, and the doctests. The
+engine keeps one that passes, and a passing run is cached as above. One in which a test
+fails is an error to the engine, which keeps no error, so the next run of the check
+runs it again: `rustTestRan`, under "Report failures by raising". The lane reads the
+failed run's report from the error. cargo-nextest writes its whole report to stderr:
+the line for each test, what a failed test printed, the summary and the `FAIL` lines
+after it. A test binary writes the test harness's report to stdout. Cargo writes
+`Doc-tests <crate>` and its hints to stderr, and rustdoc writes each package's doctest
+report to stdout. The message is the end of stdout followed by stderr, as it was when
+the steps ran with `expect: ANY`. The test build is not such a step: a compile error is
+the source's, and is kept.
+
 **What a run sees:**
 
 - At `mountPath`: the skeleton, and over it the package's own directory without the
@@ -879,12 +902,14 @@ package's position, and ends with `RustLaneResults.assertPassed` like clippy.
 - The doctest step fails closed. A package passes a failed step only when every hint is
   about another covered package. When a hint is about no covered package, or the step
   failed with no hint, every covered package fails with the step's output.
-- A package's share of the step's output is what Cargo and rustdoc printed between
-  `Doc-tests <crate>` and the package's hint. Cargo writes those two lines to stderr,
-  and rustdoc writes the doctests' report to stdout, so the engine can record the
-  report after the hint: it did once, on an engine busy with every check of the
-  acceptance. A share without the report's `test result:` line is therefore not taken
-  for the whole: the package gets the step's whole output instead.
+- A package's share of the step's output is Cargo's `Doc-tests <crate>`, rustdoc's
+  report of the package's doctests, and the package's hint. Cargo writes the first and
+  the last to stderr, and rustdoc writes the report to stdout, ending it with a `test
+  result:` line. A failed step's error carries the two streams apart, so
+  `rustTestDoctestShare` puts the share together: the heading before the package's
+  hint, and the report at the heading's place among the reports. When stdout does not
+  hold one report for each heading, the places say nothing, and the package gets the
+  step's whole output instead.
 
 ### A whole workspace
 
@@ -911,7 +936,7 @@ directory the mirror is made equal to, is `selection.repository`.
 | Step | Function | Keyed on |
 | --- | --- | --- |
 | The run | `rustTestWorkspaceRun(selection)`: `cargo nextest run`, or `cargo test`, over `selection.packageFlags(tool.test)` | The dependency layer, the repository, the settings |
-| The doctests, under nextest | `rustTestWorkspaceDoctests(selection)`: `cargo test --doc`, in the run's container | The run |
+| The doctests, under nextest | `rustTestWorkspaceDoctests(selection, after)`: `cargo test --doc`, in the run's container | The run |
 
 - **One step builds and runs.** The tests run where the volumes are mounted, so nothing
   is copied out, no step reads a package's files apart, and no run is cached for a
@@ -933,6 +958,12 @@ directory the mirror is made equal to, is `selection.repository`.
 - **`cargo test` runs the doctests itself**, so under `testRunner = "cargo"` there is one
   step. There is one step too when no selected package has a library that Cargo runs
   doctests for: with `selection.doctestable(tool.test)` empty there is no doctest to run.
+- **A failed run is not kept.** Both steps must succeed, and `rustTestRan` reads a
+  failed one, as for a package's run. The run builds and tests in one command, so the
+  engine keeps neither a failed test nor a failed build of it: the next run of the check
+  runs the step again, and Cargo compiles over what the volume holds. A failed step
+  leaves no container, so after a failed run the doctests run in the lane's container,
+  `rustTestWorkspaceLane`, and after a run that passed in the run's.
 - **The message** is `rust: test failed in <root>:` and the end of each failed command's
   output.
 
@@ -959,11 +990,16 @@ repository around it in either case. `git` the program is in the image.
   the tree, a nested build's `target` directory too, is removed by the next step's sync,
   so a test that builds a project in the tree builds it from nothing whenever the run
   runs again.
-- **A test that a signal stops is taken for a build that was killed.** The whole run is
-  one step, kept or run once more as `rustDependenciesRan` says. Under `cargo test`,
-  which reports a test binary that a signal stopped as Cargo reports a compiler, the step
-  runs once more, and the check then fails with the step's whole output and is not kept.
-  Not measured.
+- **A whole workspace's build failure is not kept.** The run builds and tests in one
+  step, which the engine keeps only when it passes. A compile error there runs the step
+  again on every run of the check, where a package at a time the test build's failure is
+  kept. A compiler that a signal stopped fails the check too: the step does not run once
+  more, as a compile lane's does, because that would run the tests twice.
+- **A failed step's output is read from its end.** The engine's error carries up to 100
+  KiB of each stream. A check's message keeps the last 200 lines, so it is the same
+  unless those lines are longer than that. The doctest step's hints are read from
+  stderr: past 100 KiB of it, a hint could be lost, and its package's failure reported
+  as the step's.
 - **clippy under a `target` setting can pass a package unchecked.** A member that Cargo
   compiles both for the host, as a build-dependency, and for the target has one package
   id in Cargo's `compiler-artifact` messages. `rustClippyBuilt` in `lane-clippy.dang`
@@ -1043,9 +1079,9 @@ assertion that does not hold.
 | `nested-workspaces` | `devCoreNested`, in `core.dang` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. | `nested` |
 | `lint-lanes` | `devLint`, in `lanes-lint.dang` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes: what each of the two cargo-deny checks rejects, and that a moved advisory database runs `advisories` again and leaves `deny` cached. | `single`, and those whose names start `lint-` |
 | `build-lanes` | `devBuild`, in `lanes-build.dang` | The recipe, the check flavour of the dependency layer, and the check, clippy and doc lanes. The settings `checkAllFeatures` and `checkNoDefaultFeatures`, and what the check lane runs with both off. `buildJobs` and `cargoEnvironment`, in the dependency layer and in the three lanes. | `members`, `single`, `pair`, `nested`, and those whose names start `build-` |
-| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. That a test which reads a file of a member below its package fails by default, and passes when `includeExtraFiles` names the file. That a selection with no library passes without a doctest step, and that a second run of it runs no command. | `single`, `members`, `test-suite`, `test-doctest`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
+| `test-lane` | `devTest`, in `lanes-test.dang` | The runner's pins, the test flavour of the dependency layer, and the test lane. `buildJobs` and `cargoEnvironment`, in the test flavour, the test build and a package's run. That a test which reads a file of a member below its package fails by default, and passes when `includeExtraFiles` names the file. That a selection with no library passes without a doctest step, and that a second run of it runs no command. That a failed run is not kept, under either runner. | `single`, `members`, `test-suite`, `test-doctest`, `test-moment`, `build-kinds`, `build-outside`, `build-jobs`, `build-environment` |
 | `cache-volumes` | `devCache`, in `lanes-cache.dang` | The helper's own tests, and the compile lanes' volumes: their names, what a lane compiles over empty volumes, after a one-file edit and after a change to the dependency layer, that a deleted file is gone, and that verdicts over warm volumes and over empty ones agree. | `test-suite`, `pair`, `build-lints`, `build-stale` |
-| `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; that a selection with no library runs no doctest step; the one clippy check and the one fmt generator. | `test-whole`, `test-suite`, `build-lints`, `lint-fmt` |
+| `whole-workspace` | `devWhole`, in `lanes-whole.dang` | The `wholeWorkspace` setting: the check names with and without it; that a package's own run fails tests which the whole run passes; the whole run's commands, volumes and mirror; the `test`, `clippy` and `testRunner` settings under it; that a selection with no library runs no doctest step; that a failed whole run is not kept; the one clippy check and the one fmt generator. | `test-whole`, `test-suite`, `test-moment`, `build-lints`, `lint-fmt` |
 | `shared-layers` | `devCoreShared`, in `core.dang` | That the seven lanes of a workspace share one recipe and one fetch. | `lint-deny` |
 
 `dev.dang` holds the checks themselves, on `Dev`, and the generator `dang-format`.

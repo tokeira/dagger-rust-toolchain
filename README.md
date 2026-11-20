@@ -463,10 +463,11 @@ the same, as after a release that only changes a member's version, or after an e
 comment, the fetch layer and the dependency layers stay cached. When it differs, as after
 a change to a dependency, a feature or a target, they run again.
 
-A lane keeps Cargo's failure as its result: the same source fails the same way without
-running again. When a signal stopped a compiler or a build script, as the kernel stops a
-process that runs out of memory, the lane runs its command once more, and does not keep
-a second failure.
+A lane keeps Cargo's failure to compile as its result: the same source fails the same
+way without running again. When a signal stopped a compiler or a build script, as the
+kernel stops a process that runs out of memory, the lane runs its command once more, and
+does not keep a second failure. A failed test run is not kept: [Tests](#tests) says what
+the test lane keeps.
 
 A `base` container needs `tar` and `xz` too, to unpack cargo-chef.
 
@@ -600,7 +601,7 @@ it for a workspace:
 | Runner | Nothing: the engine fetches cargo-nextest 0.9.151 from its GitHub release, verifies the archive's checksum for `linux/amd64` or `linux/arm64`, and unpacks it | No |
 | Dependency layer, test flavour | `cargo build --tests --workspace --profile test` over the recipe, then `cargo clean -p` for each of the workspace's own packages | No |
 | Test build | `cargo nextest list --list-type binaries-only` over the selected packages, in the lane's [cache volumes](#cache-volumes) | Yes. Over warm volumes it compiles the packages the edit reaches |
-| Run, one for each package | `cargo nextest run` over the package's test binaries and its own files | Only when the package's binaries or files changed |
+| Run, one for each package | `cargo nextest run` over the package's test binaries and its own files | Only when the package's binaries or files changed, or its last run failed |
 | Doctests | `cargo test --doc` over the selected packages, in the test build's container | Yes |
 
 The dependency layer compiles the workspace's dependencies as `cargo test` builds them.
@@ -645,6 +646,13 @@ compile error fails the check of every selected package: cargo-nextest and `carg
 have no `--keep-going`. So does a doctest step that fails without saying in which package:
 a package passes it only when Cargo names another package for every failure.
 
+The engine keeps a run that passes, and answers the next check from it for as long as
+the run's inputs are the same. It does not keep a run in which a test or a doctest
+fails: the next run of the check runs those tests again. A test that fails one time in
+several therefore fails the check only in the runs where it fails. The lane runs no test
+a second time within a check, so a test that fails always fails its check. A compile
+error is kept, like any other lane's: the same source fails the same way.
+
 ### Whole-workspace tests
 
 A package's run sees its own directory. That suits tests that stay in their package, and
@@ -656,8 +664,8 @@ and two steps do its work after the dependency layer:
 
 | Step | What runs | Runs again |
 | --- | --- | --- |
-| Run | `cargo nextest run --no-fail-fast --failure-output immediate-final --no-tests pass <settings' flags> <packages>` builds the test binaries and runs them | After any edit to the repository |
-| Doctests | `cargo test --doc --no-fail-fast <settings' flags> <packages>`, in the run's container | When the run does |
+| Run | `cargo nextest run --no-fail-fast --failure-output immediate-final --no-tests pass <settings' flags> <packages>` builds the test binaries and runs them | After any edit to the repository, or when its last run failed |
+| Doctests | `cargo test --doc --no-fail-fast <settings' flags> <packages>`, in the run's container | When the run does, or when a doctest failed last time |
 
 `<packages>` is `--workspace`, or `-p <name>` for each package the `test` setting
 selects when it leaves some out. With `testRunner = "cargo"` the run is `cargo test
@@ -686,6 +694,10 @@ one when no selected package has a library that Cargo runs doctests for: crate t
 - **The run is keyed on the repository.** Any edit runs every selected package's tests
   again, where a package's own run would stay cached. The build is still incremental in
   the lane's volumes.
+- **A failed run is not kept.** The engine keeps a run that passes. When a test or a
+  doctest fails, the next run of the check runs the step again. The run builds and tests
+  in one step, so a compile error there is not kept either: the next run compiles again,
+  over what the volumes hold.
 
 A failed test or doctest fails the check with `rust: test failed in <root>:` and the end
 of the runner's report.
@@ -724,9 +736,9 @@ assertion that does not hold.
 | `nested-workspaces` | A workspace in a directory of another, and that `workspaceRoots = ["."]` keeps to the outer one. |
 | `lint-lanes` | The `workspaceRoots` setting, and the fmt, deny and advisories lanes. |
 | `build-lanes` | The recipe, the check flavour of the dependency layer, the check, clippy and doc lanes, and the settings `checkAllFeatures`, `checkNoDefaultFeatures`, `buildJobs` and `cargoEnvironment`. |
-| `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. That `includeExtraFiles` gives a package's run a file of a member below it. |
+| `test-lane` | The test runner, the test flavour of the dependency layer, and the test lane. That `includeExtraFiles` gives a package's run a file of a member below it. That a failed run is not kept. |
 | `cache-volumes` | The compile lanes' volumes, and the helper that runs a lane's step. |
-| `whole-workspace` | The `wholeWorkspace` setting: the check names, the tests over the whole repository, and the one clippy check and fmt generator. |
+| `whole-workspace` | The `wholeWorkspace` setting: the check names, the tests over the whole repository, that a failed run is not kept, and the one clippy check and fmt generator. |
 | `shared-layers` | That the seven lanes of a workspace share one recipe and one fetch. |
 | `dang-format/stale` | That the Dang source is formatted: the module's, and the dev module's. |
 

@@ -77,7 +77,7 @@ what it reads. These facts decide what that view is. Each was measured on a
   engine seeds a new target volume from the lane's dependency layer, and a new layer
   gets a new volume.
 
-Three rules follow:
+Four rules follow:
 
 - Keep Cargo off the network outside the fetch layer. A step takes its crates with
   `withCrates`. When a crate is missing, add it to the fetch layer. Never fetch again in
@@ -88,6 +88,8 @@ Three rules follow:
 - A step run with `expect: ANY` is kept whatever Cargo did. When Cargo reports that a
   signal stopped a process, run the command again as a step that must succeed, so that
   the failure of a killed compiler is not kept.
+- A step that runs tests must succeed, so a failed run is not kept, and it is never run
+  twice.
 
 ## Engine
 

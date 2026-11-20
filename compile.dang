@@ -159,6 +159,29 @@ let rustCompileLane(
     .withEnvVariable("CARGO_TARGET_DIR", target)
 }
 
+# What runs a Cargo command under the helper: the helper, where its source,
+# its mirror and its report are, then `options`, and the command. The
+# command's stdout goes to the file `output`, or is the step's own when
+# `output` is "".
+let rustCompileArguments(
+  workspace: RustWorkspace!,
+  command: [String!]!,
+  output: String!,
+  options: [String!]!,
+): [String!]! {
+  let none: [String!]! = []
+  [
+    rustCompileHelperPath,
+    "--source", rustCompileSource,
+    "--mirror", workspace.mountPath,
+    "--report", rustCompileReport,
+  ]
+    + (if (output == "") { none } else { ["--stdout", output] })
+    + options
+    + ["--"]
+    + command
+}
+
 # Runs a Cargo command in a compile lane's container, under the helper, and
 # returns the container to read the command's exit code and stderr from.
 # Its stdout is in the file `output`, or is the step's own when `output` is
@@ -176,22 +199,24 @@ let rustCompileCargo(
   output: String!,
   options: [String!]!,
 ): Container! {
-  let none: [String!]! = []
   rustDependenciesRan(
     lane,
-    [
-      rustCompileHelperPath,
-      "--source", rustCompileSource,
-      "--mirror", workspace.mountPath,
-      "--report", rustCompileReport,
-    ]
-      + (if (output == "") { none } else { ["--stdout", output] })
-      + options
-      + ["--"]
-      + command,
+    rustCompileArguments(workspace, command, output, options),
     "",
     command,
   )
+}
+
+# A Cargo command that runs tests, in a compile lane's container, under the
+# helper, as a step that must succeed: the engine keeps the step when the
+# tests pass, and not when one fails. rustTestRan runs it and reads a failed
+# one. The command's stdout is the step's own.
+let rustCompileTests(
+  workspace: RustWorkspace!,
+  lane: Container!,
+  command: [String!]!,
+): Container! {
+  lane.withExec(rustCompileArguments(workspace, command, "", []))
 }
 
 # A compile lane's step over every package that the lane's setting selects,

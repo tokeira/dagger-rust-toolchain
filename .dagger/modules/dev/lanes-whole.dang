@@ -53,11 +53,12 @@ let devWholeCargoRun: String! = devWholeClear + "cargo test --no-fail-fast"
 let devWhole(run: DevRun!): [String!]! {
   let names = devWholeNames(run)
   let tests = devWholeTests(run)
+  let moment = devWholeMoment(run)
   let volumes = devWholeVolumes(run)
   let settings = devWholeSettings(run)
   let clippy = devWholeClippy(run)
   let fmt = devWholeFmt(run)
-  names + tests + volumes + settings + clippy + fmt
+  names + tests + moment + volumes + settings + clippy + fmt
 }
 
 # The address of the test check of a package of the fixture's workspace,
@@ -221,6 +222,31 @@ let devWholeTests(run: DevRun!): [String!]! {
     ),
   ]
   passed
+}
+
+# The fixture whose test and doctest fail with the moment they ran at: a
+# failed whole run is not kept, under either runner.
+let devWholeMoment(run: DevRun!): [String!]! {
+  let marks = [devTestMomentRan, devTestMomentDocumented]
+  let whole = devConsumer(run, devTestMomentFixture, devWholeSetting)
+  let check = "the tests of test-moment under wholeWorkspace"
+  devSays(check, devTestNotKept(whole, run, check, marks), "rust: test failed in .:")
+
+  let plain = devConfigured(
+    whole,
+    run,
+    devTestMomentFixture,
+    devWholeSetting + "testRunner = \"cargo\"\n",
+  )
+  let cargoCheck = check + " and testRunner = \"cargo\""
+  devSays(cargoCheck, devTestNotKept(plain, run, cargoCheck, marks), "rust: test failed in .:")
+  [
+    devHeld(
+      "test-moment: under wholeWorkspace = true a failed run is not kept: two runs of the "
+        + "failing test check over the same repository each report a moment of their own, from "
+        + "the test and from the doctest, under cargo-nextest and under testRunner = \"cargo\"",
+    ),
+  ]
 }
 
 # The volumes of the whole run, and the copy of the repository it runs over.

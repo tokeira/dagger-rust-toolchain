@@ -78,8 +78,9 @@ let devTest(run: DevRun!): [String!]! {
   let below = devTestBelow(run)
   let jobs = devTestJobs(run)
   let environment = devTestEnvironment(run)
+  let moment = devTestOverMoment(run)
   let suite = devTestOverSuite(run)
-  runner + single + alone + stubs + below + jobs + environment + suite
+  runner + single + alone + stubs + below + jobs + environment + moment + suite
 }
 
 # The runner's pins. A run of the lane fetches the archive of the engine's
@@ -315,6 +316,91 @@ let devTestEnvironment(run: DevRun!): [String!]! {
         + "script's message",
     ),
   ]
+}
+
+# The fixture whose test and doctest fail with the moment they ran at, and
+# what each prints before the moment.
+let devTestMomentFixture: String! = "test-moment"
+
+let devTestMomentRan: String! = "ran-at-"
+
+let devTestMomentDocumented: String! = "documented-at-"
+
+# The moment that a failed check's output reports after `mark`: the digits
+# that follow it.
+let devTestMoment(check: String!, output: String!, mark: String!): String! {
+  let moments = output
+    .split(mark)
+    .dropFirst(1)
+    .map { rest => rest.splitMatches(`[^0-9]`).takeFirst(1).join("") }
+    .filter { digits => digits != "" }
+  if (moments.length == 0) {
+    raise devCheckFailed(check, "did not report a moment after " + devQuoted(mark) + ":\n" + devTail(output))
+  }
+  moments[0]!
+}
+
+# Runs the failing test checks of `workspace` twice, as two sessions over the
+# same files, and checks that each run reports a moment of its own after
+# every one of `marks`: the second ran the tests again. Had the engine kept
+# the first run, the second would report the first's moments. It returns
+# what the first run printed.
+let devTestNotKept(
+  workspace: Container!,
+  run: DevRun!,
+  check: String!,
+  marks: [String!]!,
+): String! {
+  let first = devTestFailure(workspace, run, devTestChecks)
+  let second = devTestFailure(workspace, run, devTestChecks)
+  devEach(marks) { mark =>
+    let moment = devTestMoment(check, first, mark)
+    if (devTestMoment(check, second, mark) == moment) {
+      raise devCheckFailed(
+        check,
+        "reported " + mark + moment + " in two runs: the second ran nothing, and gave the "
+          + "failure the engine kept of the first:\n" + devTail(second),
+      )
+    }
+  }
+  first
+}
+
+# The test-moment fixture: a failed run is not kept, under either runner,
+# and its report is the runner's own.
+let devTestOverMoment(run: DevRun!): [String!]! {
+  let passed: [String!]! = []
+  let marks = [devTestMomentRan, devTestMomentDocumented]
+  let workspace = devConsumer(run, devTestMomentFixture, "")
+  let check = "the tests of test-moment, whose failures differ each time they happen"
+  let output = devTestNotKept(workspace, run, check, marks)
+  devSays(check, output, "rust: test failed in .:")
+  devTestReported(check, output, "FAIL", "test-moment::moment fails_at_a_new_moment")
+  devSays(check, output, "Summary [")
+  devSays(check, output, "Doc-tests test_moment")
+  devSays(check, output, "src/lib.rs - moment (line 9) ... FAILED")
+  devSays(check, output, "error: doctest failed, to rerun pass `--doc`")
+  passed += [
+    devHeld(
+      "test-moment: a failed run is not kept: two runs of the failing test check over the "
+        + "same files each report a moment of their own, from the test and from the doctest; "
+        + "the message has \"rust: test failed in .:\", cargo-nextest's summary and its line "
+        + "for the failed test, and the doctest's failure with Cargo's hint",
+    ),
+  ]
+
+  let withCargo = devConfigured(workspace, run, devTestMomentFixture, "testRunner = \"cargo\"\n")
+  let cargoCheck = "the tests of test-moment under testRunner = \"cargo\""
+  let cargoOutput = devTestNotKept(withCargo, run, cargoCheck, marks)
+  devSays(cargoCheck, cargoOutput, "rust: test failed in .:")
+  devSays(cargoCheck, cargoOutput, "test result: FAILED. 0 passed; 1 failed;")
+  passed += [
+    devHeld(
+      "test-moment: under testRunner = \"cargo\" a failed run is not kept either: two runs "
+        + "each report a moment of their own, from the test binary and from the doctest",
+    ),
+  ]
+  passed
 }
 
 # The test-suite fixture: what runs, what each kind of edit runs again, how
