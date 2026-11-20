@@ -22,7 +22,7 @@ In the `dagger.toml` of a repository that holds Rust code:
 
 ```toml
 [modules.rust]
-source = "github.com/tokeira/dagger-rust-toolchain@v0.3.0"
+source = "github.com/tokeira/dagger-rust-toolchain@v0.3.1"
 ```
 
 Start with no settings. [First run](#first-run) says what the module then finds, and
